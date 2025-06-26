@@ -47,6 +47,9 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.TimeZone;
 
+import java.util.List;
+import java.util.ArrayList;
+
 @CapacitorPlugin(name = "Background")
 public class BackgroundPlugin extends Plugin {
 
@@ -57,7 +60,49 @@ public class BackgroundPlugin extends Plugin {
     private String notificationChannel = "background_plugin_channel";
     private Integer notificationId = 1001;
 
-    private void showNotification(String content) {
+    @PluginMethod
+    public void showNotificationFromIonic(PluginCall call) {
+        try {
+            JSObject data = call.getData();
+            JSONObject json = new JSONObject(data.toString());
+
+            if (json != null && json.has("sgs")) {
+                JSONArray originalSgs = json.optJSONArray("sgs");
+            
+                if (originalSgs != null) {
+                    JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs);
+            
+                    // Update nestedPatientData.sgs
+                    json.put("sgs", cleanedSortedSgs);
+                }
+            }
+
+            this.doLogg("Polling: refresh notification");
+            // Assume this is the same structure as from your API
+            JSONObject last = getLastGlicemia(json);
+            String since = getTimeSinceLastGS(json);
+
+            double sgValue = Double.parseDouble(last.getString("sg"));
+            String status = (sgValue < 4) ? " (LOW)" : (sgValue > 8) ? " (HIGH)" : "";
+            String text = "SG: " + last.getString("sg") + since + status;
+
+            
+            this.doLogg("Polling: refresh notification");
+            boolean playSound = (sgValue < 5);
+            showNotification(text, playSound); // reuse your existing method
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            call.resolve(ret);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            call.reject("Failed to show notification: " + e.getMessage());
+        }
+    }
+
+
+    private void showNotification(String content, Boolean playSound) {
         Context context = getContext();
 
         NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
@@ -66,7 +111,7 @@ public class BackgroundPlugin extends Plugin {
             NotificationChannel channel = new NotificationChannel(
                 this.notificationChannel,
                 "Background Plugin Notifications",
-                NotificationManager.IMPORTANCE_DEFAULT
+                playSound ? NotificationManager.IMPORTANCE_HIGH : NotificationManager.IMPORTANCE_LOW
             );
             notificationManager.createNotificationChannel(channel);
         }
@@ -90,7 +135,7 @@ public class BackgroundPlugin extends Plugin {
             return;
         }
 
-        this.showNotification(content);
+        this.showNotification(content, false);
     }
 
     @PluginMethod
@@ -160,7 +205,7 @@ public class BackgroundPlugin extends Plugin {
                 this.doLogg("Polling: error token refresh");
                 this.doLogg(e.getMessage());
             }
-        }, 0, 30, TimeUnit.SECONDS);
+        }, 0, 2, TimeUnit.MINUTES);
 
         JSObject result = new JSObject();
         result.put("started", true);
@@ -302,6 +347,17 @@ public class BackgroundPlugin extends Plugin {
                 JSONObject jsonData = new JSONObject(responseBody);// from getData()
                 JSONObject nestedPatientData = (JSONObject) jsonData.get("patientData");
 
+                if (nestedPatientData != null && nestedPatientData.has("sgs")) {
+                    JSONArray originalSgs = nestedPatientData.optJSONArray("sgs");
+                
+                    if (originalSgs != null) {
+                        JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs);
+                
+                        // Update nestedPatientData.sgs
+                        nestedPatientData.put("sgs", cleanedSortedSgs);
+                    }
+                }
+
                 notifyListeners("onLogged", this.convertJSONObjectToJSObject(nestedPatientData));
                 JSONObject last = getLastGlicemia(nestedPatientData);
                 String timeSince = this.getTimeSinceLastGS(nestedPatientData);
@@ -325,7 +381,8 @@ public class BackgroundPlugin extends Plugin {
 
                 // Construct the notification text
                 String text = "SG: " + sgFormatted + timeSince + status;
-                this.showNotification(text);
+                boolean playSound = (sg < 5);
+                showNotification(text, playSound); // reuse your existing method
 
             } catch (Exception e) {
                 Log.e("BackgroundPlugin", "Error in getData()", e);
@@ -338,6 +395,46 @@ public class BackgroundPlugin extends Plugin {
         }).start();
     }
 
+    private JSONArray cleanAndSortSgs(JSONArray sgsArray) {
+        try {
+            List<JSONObject> sgList = new ArrayList<>();
+    
+            // Step 1: Reverse and filter (sg > 0 && has timestamp)
+            for (int i = sgsArray.length() - 1; i >= 0; i--) {
+                JSONObject sg = sgsArray.optJSONObject(i);
+                if (sg != null && sg.has("sg") && sg.optInt("sg", 0) > 0 && sg.has("timestamp")) {
+                    sgList.add(sg);
+                }
+            }
+    
+            // Step 2: Sort descending by ISO timestamp
+            sgList.sort((a, b) -> {
+                try {
+                    String tsA = a.optString("timestamp");
+                    String tsB = b.optString("timestamp");
+    
+                    long timeA = parseIso8601ToMillis(tsA);
+                    long timeB = parseIso8601ToMillis(tsB);
+    
+                    return Long.compare(timeB, timeA); // descending
+                } catch (Exception e) {
+                    return 0;
+                }
+            });
+    
+            // Step 3: Return as JSONArray
+            JSONArray result = new JSONArray();
+            for (JSONObject sg : sgList) {
+                result.put(sg);
+            }
+            return result;
+    
+        } catch (Exception e) {
+            e.printStackTrace();
+            return new JSONArray(); // fallback
+        }
+    }
+    
     public JSObject convertJSONObjectToJSObject(JSONObject jsonObject) {
         try {
             // Convert JSONObject to String
@@ -373,13 +470,16 @@ public class BackgroundPlugin extends Plugin {
     
             if (data.has("lastSG")) {
                 JSONObject lastSG = data.optJSONObject("lastSG");
-                if (lastSG != null && lastSG.has("sg")) {
+                
+                if (lastSG != null && lastSG.has("sg") && lastSG.optInt("sg", 0) > 0) {
                     sgObject = lastSG;
                 }
             }
     
             if (sgObject == null && data.has("sgs")) {
                 JSONArray sgs = data.optJSONArray("sgs");
+                this.doLogg("Polling: get sgs");
+                this.doLogg(sgs.toString());
                 if (sgs != null && sgs.length() > 0) {
                     JSONObject firstSG = sgs.optJSONObject(0);
                     if (firstSG != null) {
@@ -455,7 +555,6 @@ public class BackgroundPlugin extends Plugin {
             return "No valid SG data";
         }
     }
-
     
     private String formatToIso8601(long timestamp) {
         try {
@@ -467,6 +566,7 @@ public class BackgroundPlugin extends Plugin {
             return "";
         }
     }
+
     private long parseIso8601ToMillis(String isoTime) {
         try {
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);

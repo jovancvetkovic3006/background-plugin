@@ -68,10 +68,10 @@ public class BackgroundPlugin extends Plugin {
 
             if (json != null && json.has("sgs")) {
                 JSONArray originalSgs = json.optJSONArray("sgs");
-            
+
                 if (originalSgs != null) {
                     JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs);
-            
+
                     // Update nestedPatientData.sgs
                     json.put("sgs", cleanedSortedSgs);
                 }
@@ -86,7 +86,7 @@ public class BackgroundPlugin extends Plugin {
             String status = (sgValue < 4) ? " (LOW)" : (sgValue > 8) ? " (HIGH)" : "";
             String text = "SG: " + last.getString("sg") + since + status;
 
-            
+
             this.doLogg("Polling: refresh notification");
             boolean playSound = (sgValue < 5);
             showNotification(text, playSound); // reuse your existing method
@@ -197,17 +197,17 @@ public class BackgroundPlugin extends Plugin {
 
         this.doLogg("Polling started");
         scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(() -> {
-            this.doLogg("Polling: attempting token refresh");
-            try {
-                refreshTokenSilently(); // 👇 see below
-            } catch (Exception e) {
-                this.doLogg("Polling: error token refresh");
-                this.doLogg(e.getMessage());
-            }
-        }, 0, 2, TimeUnit.MINUTES);
+      scheduler.scheduleWithFixedDelay(() -> {
+        this.doLogg("Polling: attempting token refresh");
+        try {
+          refreshTokenSilently();
+        } catch (Exception e) {
+          this.doLogg("Polling: error token refresh");
+          this.doLogg(e.getMessage());
+        }
+      }, 0, 2, TimeUnit.MINUTES);
 
-        JSObject result = new JSObject();
+      JSObject result = new JSObject();
         result.put("started", true);
         call.resolve(result);
     }
@@ -349,10 +349,10 @@ public class BackgroundPlugin extends Plugin {
 
                 if (nestedPatientData != null && nestedPatientData.has("sgs")) {
                     JSONArray originalSgs = nestedPatientData.optJSONArray("sgs");
-                
+
                     if (originalSgs != null) {
                         JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs);
-                
+
                         // Update nestedPatientData.sgs
                         nestedPatientData.put("sgs", cleanedSortedSgs);
                     }
@@ -398,7 +398,7 @@ public class BackgroundPlugin extends Plugin {
     private JSONArray cleanAndSortSgs(JSONArray sgsArray) {
         try {
             List<JSONObject> sgList = new ArrayList<>();
-    
+
             // Step 1: Reverse and filter (sg > 0 && has timestamp)
             for (int i = sgsArray.length() - 1; i >= 0; i--) {
                 JSONObject sg = sgsArray.optJSONObject(i);
@@ -406,35 +406,35 @@ public class BackgroundPlugin extends Plugin {
                     sgList.add(sg);
                 }
             }
-    
+
             // Step 2: Sort descending by ISO timestamp
             sgList.sort((a, b) -> {
                 try {
                     String tsA = a.optString("timestamp");
                     String tsB = b.optString("timestamp");
-    
+
                     long timeA = parseIso8601ToMillis(tsA);
                     long timeB = parseIso8601ToMillis(tsB);
-    
+
                     return Long.compare(timeB, timeA); // descending
                 } catch (Exception e) {
                     return 0;
                 }
             });
-    
+
             // Step 3: Return as JSONArray
             JSONArray result = new JSONArray();
             for (JSONObject sg : sgList) {
                 result.put(sg);
             }
             return result;
-    
+
         } catch (Exception e) {
             e.printStackTrace();
             return new JSONArray(); // fallback
         }
     }
-    
+
     public JSObject convertJSONObjectToJSObject(JSONObject jsonObject) {
         try {
             // Convert JSONObject to String
@@ -467,15 +467,15 @@ public class BackgroundPlugin extends Plugin {
     private JSONObject getLastGlicemia(JSONObject data) {
         try {
             JSONObject sgObject = null;
-    
+
             if (data.has("lastSG")) {
                 JSONObject lastSG = data.optJSONObject("lastSG");
-                
+
                 if (lastSG != null && lastSG.has("sg") && lastSG.optInt("sg", 0) > 0) {
                     sgObject = lastSG;
                 }
             }
-    
+
             if (sgObject == null && data.has("sgs")) {
                 JSONArray sgs = data.optJSONArray("sgs");
                 this.doLogg("Polling: get sgs");
@@ -487,11 +487,11 @@ public class BackgroundPlugin extends Plugin {
                     }
                 }
             }
-    
+
             if (sgObject != null && sgObject.has("sg")) {
                 int sgMg = sgObject.optInt("sg", 0);
                 double sgMmol = sgMg / 18.0;
-    
+
                 // extract raw timestamp
                 long rawTimestamp = 0;
                 if (sgObject.has("timestamp")) {
@@ -503,23 +503,23 @@ public class BackgroundPlugin extends Plugin {
                         rawTimestamp = parseIso8601ToMillis((String) ts);
                     }
                 }
-    
+
                 if (rawTimestamp == 0) {
                     rawTimestamp = System.currentTimeMillis();
                 }
-    
+
                 JSONObject result = new JSONObject();
                 result.put("sg", String.format(Locale.US, "%.1f", sgMmol));
                 result.put("timestamp", rawTimestamp);  // return as raw number
                 return result;
             }
-    
+
             // Fallback
             JSONObject fallback = new JSONObject();
             fallback.put("sg", "0.0");
             fallback.put("timestamp", System.currentTimeMillis());
             return fallback;
-    
+
         } catch (Exception e) {
             e.printStackTrace();
             JSONObject fallback = new JSONObject();
@@ -530,32 +530,32 @@ public class BackgroundPlugin extends Plugin {
             return fallback;
         }
     }
-    
+
     private String getTimeSinceLastGS(JSONObject data) {
         try {
             JSONObject last = getLastGlicemia(data);
             if (last == null || !last.has("timestamp")) {
                 return "No last SG data";
             }
-    
+
             long now = System.currentTimeMillis();
             long lastTime = last.optLong("timestamp", now);
-    
+
             long diffMs = now - lastTime;
             int minutes = (int) (diffMs / 60000);
             int hours = minutes / 60;
             int remainingMinutes = minutes % 60;
-    
+
             return (hours > 0)
                 ? String.format(" pre %dh %dm", hours, remainingMinutes)
                 : String.format(" pre %dm", minutes);
-    
+
         } catch (Exception e) {
             e.printStackTrace();
             return "No valid SG data";
         }
     }
-    
+
     private String formatToIso8601(long timestamp) {
         try {
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
@@ -577,6 +577,6 @@ public class BackgroundPlugin extends Plugin {
             return 0;
         }
     }
-    
+
 
 }

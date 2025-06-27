@@ -77,7 +77,7 @@ public class BackgroundPlugin extends Plugin {
                 }
             }
 
-            this.doLogg("Polling: refresh notification");
+            this.doLogg(json.toString());
             // Assume this is the same structure as from your API
             JSONObject last = getLastGlicemia(json);
             String since = getTimeSinceLastGS(json);
@@ -86,9 +86,16 @@ public class BackgroundPlugin extends Plugin {
             String status = (sgValue < 4) ? " (LOW)" : (sgValue > 8) ? " (HIGH)" : "";
             String text = "SG: " + last.getString("sg") + since + status;
 
-
-            this.doLogg("Polling: refresh notification");
             boolean playSound = (sgValue < 5);
+
+            if (json.has("conduitSensorInRange")) {
+                
+                boolean flag = json.optBoolean("conduitSensorInRange", false);
+                if (!flag) {
+                    text = "Senzor nije povezan";
+                    playSound = false;
+                }
+            }
             showNotification(text, playSound); // reuse your existing method
 
             JSObject ret = new JSObject();
@@ -382,6 +389,14 @@ public class BackgroundPlugin extends Plugin {
                 // Construct the notification text
                 String text = "SG: " + sgFormatted + timeSince + status;
                 boolean playSound = (sg < 5);
+
+                if (nestedPatientData.has("conduitSensorInRange")) {
+                    boolean flag = nestedPatientData.optBoolean("conduitSensorInRange", false);
+                if (!flag) {
+                        text = "Senzor nije povezan";
+                        playSound = false;
+                    }
+                }
                 showNotification(text, playSound); // reuse your existing method
 
             } catch (Exception e) {

@@ -171,9 +171,9 @@ public class BackgroundPlugin extends Plugin {
                 String body = since.trim();
                 String statusText = "";
                 if (sgValue < 4.5)
-                    statusText = "\u26a0 Niska glikemija!";
+                    statusText = "\u2757 Niska glikemija!";
                 else if (sgValue > 10.0)
-                    statusText = "\u26a0 Visoka glikemija!";
+                    statusText = "\u26a1 Visoka glikemija!";
                 String fullBody = body + (statusText.isEmpty() ? "" : " " + statusText);
                 showNotification(title, fullBody, sgValue, playSound);
                 updateWidget(last.getString("sg"), trendArrow, body, statusText, sgValue);
@@ -578,9 +578,9 @@ public class BackgroundPlugin extends Plugin {
                     String body = timeSince.trim();
                     String statusText = "";
                     if (sg < 4.5)
-                        statusText = "\u26a0 Niska glikemija!";
+                        statusText = "\u2757 Niska glikemija!";
                     else if (sg > 10.0)
-                        statusText = "\u26a0 Visoka glikemija!";
+                        statusText = "\u26a1 Visoka glikemija!";
                     String fullBody = body + (statusText.isEmpty() ? "" : " " + statusText);
                     showNotification(title, fullBody, sg, playSound);
                     updateWidget(last.optString("sg", "--"), trendArrow, body, statusText, sg);

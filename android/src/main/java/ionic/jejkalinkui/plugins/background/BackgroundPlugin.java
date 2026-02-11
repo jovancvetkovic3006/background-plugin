@@ -248,6 +248,9 @@ public class BackgroundPlugin extends Plugin {
         this.showNotification(content, "", 0, false);
     }
 
+    private PluginCall pendingPermissionCall = null;
+    private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 12345;
+
     @PluginMethod
     public void requestNotificationPermission(PluginCall call) {
         Activity activity = getActivity();
@@ -256,14 +259,32 @@ public class BackgroundPlugin extends Plugin {
             if (ContextCompat.checkSelfPermission(activity,
                     Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
 
-                ActivityCompat.requestPermissions(activity, new String[] { Manifest.permission.POST_NOTIFICATIONS },
-                        12345);
+                pendingPermissionCall = call;
+                ActivityCompat.requestPermissions(activity,
+                        new String[] { Manifest.permission.POST_NOTIFICATIONS },
+                        NOTIFICATION_PERMISSION_REQUEST_CODE);
+                return; // wait for onRequestPermissionsResult
             }
         }
 
+        // Already granted or pre-TIRAMISU
         JSObject result = new JSObject();
-        result.put("granted", true); // naive - you could listen for the result code too
+        result.put("granted", true);
         call.resolve(result);
+    }
+
+    @Override
+    protected void handleRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.handleRequestPermissionsResult(requestCode, permissions, grantResults);
+
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE && pendingPermissionCall != null) {
+            boolean granted = grantResults.length > 0
+                    && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            JSObject result = new JSObject();
+            result.put("granted", granted);
+            pendingPermissionCall.resolve(result);
+            pendingPermissionCall = null;
+        }
     }
 
     @PluginMethod

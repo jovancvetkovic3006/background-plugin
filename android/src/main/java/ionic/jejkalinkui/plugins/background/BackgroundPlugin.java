@@ -164,15 +164,19 @@ public class BackgroundPlugin extends Plugin {
 
             if (!sensorConnected) {
                 showNotification("Senzor nije povezan", "", 0, false);
+                updateWidget("--", "", "Senzor nije povezan", "", 0);
             } else {
                 String trendArrow = getTrendArrow(json);
                 String title = last.getString("sg") + " mmol/L" + trendArrow;
                 String body = since.trim();
+                String statusText = "";
                 if (sgValue < 4.5)
-                    body += " \u26a0 Niska glikemija!";
+                    statusText = "\u26a0 Niska glikemija!";
                 else if (sgValue > 10.0)
-                    body += " \u26a0 Visoka glikemija!";
-                showNotification(title, body, sgValue, playSound);
+                    statusText = "\u26a0 Visoka glikemija!";
+                String fullBody = body + (statusText.isEmpty() ? "" : " " + statusText);
+                showNotification(title, fullBody, sgValue, playSound);
+                updateWidget(last.getString("sg"), trendArrow, body, statusText, sgValue);
             }
 
             JSObject ret = new JSObject();
@@ -423,6 +427,27 @@ public class BackgroundPlugin extends Plugin {
         }
     }
 
+    private void updateWidget(String glucoseValue, String trendArrow, String timeSince, String status, double sgValue) {
+        try {
+            Context context = getContext();
+            android.content.SharedPreferences prefs = context.getSharedPreferences("glucose_widget_prefs",
+                    Context.MODE_PRIVATE);
+            prefs.edit()
+                    .putString("glucose_value", glucoseValue)
+                    .putString("trend_arrow", trendArrow)
+                    .putString("time_since", timeSince)
+                    .putString("status", status)
+                    .putString("sg_double", String.valueOf(sgValue))
+                    .apply();
+
+            Intent intent = new Intent("ionic.jejkalinkui.UPDATE_GLUCOSE_WIDGET");
+            intent.setComponent(new android.content.ComponentName(context, "ionic.jejkalinkui.GlucoseWidgetProvider"));
+            context.sendBroadcast(intent);
+        } catch (Exception e) {
+            Log.e("BackgroundPlugin", "Widget update failed", e);
+        }
+    }
+
     private int getNotificationIcon(Context context) {
         int iconId = context.getResources().getIdentifier("ic_notification_glucose", "drawable",
                 context.getPackageName());
@@ -546,15 +571,19 @@ public class BackgroundPlugin extends Plugin {
 
                 if (!sensorConnected) {
                     showNotification("Senzor nije povezan", "", 0, false);
+                    updateWidget("--", "", "Senzor nije povezan", "", 0);
                 } else {
                     String trendArrow = getTrendArrow(nestedPatientData);
                     String title = last.optString("sg", "0") + " mmol/L" + trendArrow;
                     String body = timeSince.trim();
+                    String statusText = "";
                     if (sg < 4.5)
-                        body += " \u26a0 Niska glikemija!";
+                        statusText = "\u26a0 Niska glikemija!";
                     else if (sg > 10.0)
-                        body += " \u26a0 Visoka glikemija!";
-                    showNotification(title, body, sg, playSound);
+                        statusText = "\u26a0 Visoka glikemija!";
+                    String fullBody = body + (statusText.isEmpty() ? "" : " " + statusText);
+                    showNotification(title, fullBody, sg, playSound);
+                    updateWidget(last.optString("sg", "--"), trendArrow, body, statusText, sg);
                 }
 
             } catch (Exception e) {

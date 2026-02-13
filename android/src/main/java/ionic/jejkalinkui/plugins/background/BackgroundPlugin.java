@@ -167,16 +167,49 @@ public class BackgroundPlugin extends Plugin {
                 updateWidget("--", "", "Senzor nije povezan", "", 0);
             } else {
                 String trendArrow = getTrendArrow(json);
-                String title = last.getString("sg") + " mmol/L" + trendArrow;
-                String body = since.trim();
+                String title = last.getString("sg") + " mmol/L" + trendArrow + "  \u00b7  " + since.trim();
                 String statusText = "";
                 if (sgValue < 4.5)
                     statusText = "\u2757 Niska glikemija!";
                 else if (sgValue > 10.0)
                     statusText = "\u26a1 Visoka glikemija!";
-                String fullBody = body + (statusText.isEmpty() ? "" : " " + statusText);
-                showNotification(title, fullBody, sgValue, playSound);
-                updateWidget(last.getString("sg"), trendArrow, body, statusText, sgValue);
+                // Build body with status + details
+                StringBuilder body = new StringBuilder();
+                if (!statusText.isEmpty()) {
+                    body.append(statusText);
+                }
+                // Details section with top padding
+                StringBuilder details = new StringBuilder();
+                try {
+                    JSONObject ai = json.optJSONObject("activeInsulin");
+                    Log.i("BackgroundPlugin", "activeInsulin from Ionic: " + (ai != null ? ai.toString() : "null"));
+                    if (ai != null) {
+                        double amount = ai.optDouble("amount", 0);
+                        details.append("Aktivni insulin: ")
+                                .append(String.format(java.util.Locale.US, "%.1f", amount)).append(" U");
+                    }
+                } catch (Exception ignored) {
+                }
+                double reservoir = json.optDouble("reservoirRemainingUnits", -1);
+                if (reservoir >= 0) {
+                    if (details.length() > 0)
+                        details.append("\n");
+                    details.append("Rezervoar: ")
+                            .append(String.format(java.util.Locale.US, "%.0f", reservoir)).append(" U");
+                }
+                boolean isTempBasal = json.optBoolean("isTempBasal", false);
+                if (isTempBasal) {
+                    if (details.length() > 0)
+                        details.append("\n");
+                    details.append("Temporalni bazal: aktivan");
+                }
+                if (details.length() > 0) {
+                    if (body.length() > 0)
+                        body.append("\n");
+                    body.append(details);
+                }
+                showNotification(title, body.toString().trim(), sgValue, playSound);
+                updateWidget(last.getString("sg"), trendArrow, since.trim(), statusText, sgValue);
             }
 
             JSObject ret = new JSObject();
@@ -216,11 +249,6 @@ public class BackgroundPlugin extends Plugin {
                 .setContentIntent(pendingIntent)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setCategory(NotificationCompat.CATEGORY_STATUS);
-
-        // Large icon with glucose value in colored circle
-        if (sgValue > 0) {
-            builder.setLargeIcon(createGlucoseIcon(sgValue));
-        }
 
         // Expanded style with extra info
         if (body != null && !body.isEmpty()) {
@@ -607,16 +635,48 @@ public class BackgroundPlugin extends Plugin {
                     updateWidget("--", "", "Senzor nije povezan", "", 0);
                 } else {
                     String trendArrow = getTrendArrow(nestedPatientData);
-                    String title = last.optString("sg", "0") + " mmol/L" + trendArrow;
-                    String body = timeSince.trim();
+                    String title = last.optString("sg", "0") + " mmol/L" + trendArrow + "  \u00b7  " + timeSince.trim();
                     String statusText = "";
                     if (sg < 4.5)
                         statusText = "\u2757 Niska glikemija!";
                     else if (sg > 10.0)
                         statusText = "\u26a1 Visoka glikemija!";
-                    String fullBody = body + (statusText.isEmpty() ? "" : " " + statusText);
-                    showNotification(title, fullBody, sg, playSound);
-                    updateWidget(last.optString("sg", "--"), trendArrow, body, statusText, sg);
+                    StringBuilder body = new StringBuilder();
+                    if (!statusText.isEmpty()) {
+                        body.append(statusText);
+                    }
+                    StringBuilder details = new StringBuilder();
+                    try {
+                        JSONObject ai = nestedPatientData.optJSONObject("activeInsulin");
+                        Log.i("BackgroundPlugin",
+                                "activeInsulin from getData: " + (ai != null ? ai.toString() : "null"));
+                        if (ai != null) {
+                            double amount = ai.optDouble("amount", 0);
+                            details.append("Aktivni insulin: ")
+                                    .append(String.format(java.util.Locale.US, "%.1f", amount)).append(" U");
+                        }
+                    } catch (Exception ignored) {
+                    }
+                    double reservoir = nestedPatientData.optDouble("reservoirRemainingUnits", -1);
+                    if (reservoir >= 0) {
+                        if (details.length() > 0)
+                            details.append("\n");
+                        details.append("Rezervoar: ")
+                                .append(String.format(java.util.Locale.US, "%.0f", reservoir)).append(" U");
+                    }
+                    boolean isTempBasal = nestedPatientData.optBoolean("isTempBasal", false);
+                    if (isTempBasal) {
+                        if (details.length() > 0)
+                            details.append("\n");
+                        details.append("Temporalni bazal: aktivan");
+                    }
+                    if (details.length() > 0) {
+                        if (body.length() > 0)
+                            body.append("\n");
+                        body.append(details);
+                    }
+                    showNotification(title, body.toString().trim(), sg, playSound);
+                    updateWidget(last.optString("sg", "--"), trendArrow, timeSince.trim(), statusText, sg);
                 }
 
             } catch (Exception e) {

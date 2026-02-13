@@ -318,6 +318,16 @@ public class BackgroundPlugin extends Plugin {
 
         this.accessToken = access;
         this.refreshToken = refresh;
+        this.doLogg("setTokens: tokens updated from Ionic, fetching data immediately...");
+
+        // Immediately fetch data with new tokens to update notification + widget
+        new Thread(() -> {
+            try {
+                this.getData();
+            } catch (Exception e) {
+                this.doLogg("setTokens: getData after token update failed: " + e.getMessage());
+            }
+        }).start();
 
         JSObject result = new JSObject();
         result.put("success", true);
@@ -422,6 +432,17 @@ public class BackgroundPlugin extends Plugin {
                 this.doLogg("Polling: refresh FAILED status=" + responseCode + " body="
                         + response.toString().substring(0, Math.min(200, response.length())));
                 Log.e("BackgroundPlugin", "Refresh failed: " + response.toString());
+
+                // Try getData with existing token — Ionic may have refreshed it already
+                if (this.accessToken != null) {
+                    this.doLogg("Polling: refresh failed, trying getData with existing token...");
+                    try {
+                        this.getData();
+                        return; // getData succeeded, no need to show error
+                    } catch (Exception e) {
+                        this.doLogg("Polling: getData with existing token also failed: " + e.getMessage());
+                    }
+                }
 
                 JSObject error = new JSObject();
                 error.put("error", "token_refresh_failed");

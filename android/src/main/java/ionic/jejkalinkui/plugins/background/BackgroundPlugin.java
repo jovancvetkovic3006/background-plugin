@@ -419,10 +419,22 @@ public class BackgroundPlugin extends Plugin {
                 }
 
             } else {
+                this.doLogg("Polling: refresh FAILED status=" + responseCode + " body="
+                        + response.toString().substring(0, Math.min(200, response.length())));
                 Log.e("BackgroundPlugin", "Refresh failed: " + response.toString());
+
+                JSObject error = new JSObject();
+                error.put("error", "token_refresh_failed");
+                error.put("status", responseCode);
+                error.put("message", response.toString().substring(0, Math.min(200, response.length())));
+                notifyListeners("onTokenRefreshFailed", error);
+
+                showNotification("Token istekao", "Otvorite aplikaciju za ponovnu prijavu", 0, false);
+                updateWidget("--", "", "Token istekao", "", 0);
             }
 
         } catch (Exception e) {
+            this.doLogg("Polling: exception: " + e.getMessage());
             Log.e("BackgroundPlugin", "Exception in background refresh", e);
         }
     }

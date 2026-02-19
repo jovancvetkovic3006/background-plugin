@@ -399,6 +399,26 @@ public class BackgroundPlugin extends Plugin {
         call.resolve(result);
     }
 
+    @PluginMethod
+    public void unlockOrientation(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity != null) {
+            activity.runOnUiThread(() -> activity
+                    .setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED));
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void lockPortrait(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity != null) {
+            activity.runOnUiThread(() -> activity
+                    .setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT));
+        }
+        call.resolve();
+    }
+
     private void refreshTokenSilently() {
         if (this.refreshToken == null) {
             this.doLogg("No refresh token available.");

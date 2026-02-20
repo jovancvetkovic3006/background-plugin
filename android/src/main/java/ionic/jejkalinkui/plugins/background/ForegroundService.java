@@ -15,16 +15,16 @@ public class ForegroundService extends Service {
         Log.d("BGPlugin", "Foreground service started");
 
         // You must show a notification to keep foreground mode active
-      Notification notification = null;
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        notification = new Notification.Builder(this, "background_plugin_channel")
-            .setContentTitle("Background Monitoring Active")
-            .setContentText("Polling glucose & token")
-            .setSmallIcon(android.R.drawable.ic_popup_sync)
-            .build();
-      }
+        Notification notification = null;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            notification = new Notification.Builder(this, "bg_plugin_normal_v2")
+                    .setContentTitle("JejkaLink")
+                    .setContentText("Monitoring aktivan")
+                    .setSmallIcon(android.R.drawable.ic_popup_sync)
+                    .build();
+        }
 
-      startForeground(1001, notification);
+        startForeground(1001, notification);
 
         return START_STICKY;
     }

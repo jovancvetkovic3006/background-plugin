@@ -274,32 +274,45 @@ public class BackgroundPlugin extends Plugin {
                 context, 0, launchIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
+        // Refresh action button
+        Intent refreshIntent = new Intent("ionic.jejkalinkui.ACTION_REFRESH");
+        refreshIntent.setPackage(context.getPackageName());
+        PendingIntent refreshPending = PendingIntent.getBroadcast(
+                context, 0, refreshIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        // Color based on glucose level
+        int accentColor;
+        if (sgValue < 4.5) {
+            accentColor = Color.parseColor("#C62828");
+        } else if (sgValue <= 7.5) {
+            accentColor = Color.parseColor("#2E7D32");
+        } else {
+            accentColor = Color.parseColor("#E65100");
+        }
+
+        // Large icon with glucose value
+        Bitmap largeIcon = createGlucoseIcon(sgValue);
+
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
                 .setContentTitle(title)
                 .setContentText(body)
                 .setSmallIcon(getNotificationIcon(context))
+                .setLargeIcon(largeIcon)
                 .setAutoCancel(false)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
-                .setFullScreenIntent(pendingIntent, true)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setCategory(NotificationCompat.CATEGORY_STATUS);
+                .setColor(accentColor)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .addAction(android.R.drawable.ic_popup_sync, "Osveži", refreshPending);
 
         // Expanded style with extra info
         if (body != null && !body.isEmpty()) {
             builder.setStyle(new NotificationCompat.BigTextStyle()
                     .bigText(body)
                     .setBigContentTitle(title));
-        }
-
-        // Color the notification accent
-        if (sgValue < 4.5) {
-            builder.setColor(Color.parseColor("#C62828"));
-        } else if (sgValue <= 7.5) {
-            builder.setColor(Color.parseColor("#2E7D32"));
-        } else if (sgValue > 7.5) {
-            builder.setColor(Color.parseColor("#E65100"));
         }
 
         notificationManager.notify(this.notificationId, builder.build());

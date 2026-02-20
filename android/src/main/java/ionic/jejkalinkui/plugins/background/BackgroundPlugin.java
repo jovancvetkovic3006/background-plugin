@@ -257,69 +257,78 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void showNotification(String title, String body, double sgValue, boolean playSound) {
-        Context context = getContext();
+        try {
+            Context context = getContext();
+            if (context == null) {
+                this.doLogg("showNotification: context is null, skipping");
+                return;
+            }
 
-        NotificationManager notificationManager = (NotificationManager) context
-                .getSystemService(Context.NOTIFICATION_SERVICE);
+            NotificationManager notificationManager = (NotificationManager) context
+                    .getSystemService(Context.NOTIFICATION_SERVICE);
 
-        String channelId = playSound ? CHANNEL_ALERT : CHANNEL_NORMAL;
+            String channelId = playSound ? CHANNEL_ALERT : CHANNEL_NORMAL;
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService();
-        }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService();
+            }
 
-        // Open app on tap
-        Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-                context, 0, launchIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            // Open app on tap
+            Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+            PendingIntent pendingIntent = PendingIntent.getActivity(
+                    context, 0, launchIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        // Refresh action button
-        Intent refreshIntent = new Intent("ionic.jejkalinkui.ACTION_REFRESH");
-        refreshIntent.setPackage(context.getPackageName());
-        PendingIntent refreshPending = PendingIntent.getBroadcast(
-                context, 0, refreshIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            // Refresh action button
+            Intent refreshIntent = new Intent("ionic.jejkalinkui.ACTION_REFRESH");
+            refreshIntent.setPackage(context.getPackageName());
+            PendingIntent refreshPending = PendingIntent.getBroadcast(
+                    context, 0, refreshIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        // Color based on glucose level
-        int accentColor;
-        if (sgValue < 4.5) {
-            accentColor = Color.parseColor("#C62828");
-        } else if (sgValue <= 7.5) {
-            accentColor = Color.parseColor("#2E7D32");
-        } else {
-            accentColor = Color.parseColor("#E65100");
-        }
+            // Color based on glucose level
+            int accentColor;
+            if (sgValue < 4.5) {
+                accentColor = Color.parseColor("#C62828");
+            } else if (sgValue <= 7.5) {
+                accentColor = Color.parseColor("#2E7D32");
+            } else {
+                accentColor = Color.parseColor("#E65100");
+            }
 
-        // Large icon with glucose value
-        Bitmap largeIcon = createGlucoseIcon(sgValue);
+            // Large icon with glucose value
+            Bitmap largeIcon = createGlucoseIcon(sgValue);
 
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setSmallIcon(getNotificationIcon(context))
-                .setLargeIcon(largeIcon)
-                .setAutoCancel(false)
-                .setOngoing(true)
-                .setContentIntent(pendingIntent)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setColor(accentColor)
-                .setCategory(NotificationCompat.CATEGORY_STATUS)
-                .addAction(android.R.drawable.ic_popup_sync, "Osveži", refreshPending);
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
+                    .setContentTitle(title)
+                    .setContentText(body)
+                    .setSmallIcon(getNotificationIcon(context))
+                    .setLargeIcon(largeIcon)
+                    .setAutoCancel(false)
+                    .setOngoing(true)
+                    .setContentIntent(pendingIntent)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setColor(accentColor)
+                    .addAction(android.R.drawable.ic_popup_sync, "Osveži", refreshPending);
 
-        // Expanded style with extra info
-        if (body != null && !body.isEmpty()) {
-            builder.setStyle(new NotificationCompat.BigTextStyle()
-                    .bigText(body)
-                    .setBigContentTitle(title));
-        }
+            // Expanded style with extra info
+            if (body != null && !body.isEmpty()) {
+                builder.setStyle(new NotificationCompat.BigTextStyle()
+                        .bigText(body)
+                        .setBigContentTitle(title));
+            }
 
-        notificationManager.notify(this.notificationId, builder.build());
+            notificationManager.notify(this.notificationId, builder.build());
+            this.doLogg("showNotification: notified OK");
 
-        // Fire a separate critical notification for low glycemia that bypasses DND
-        if (sgValue > 0 && sgValue < 4.5) {
-            showCriticalNotification(context, notificationManager, title, pendingIntent);
+            // Fire a separate critical notification for low glycemia that bypasses DND
+            if (sgValue > 0 && sgValue < 4.5) {
+                showCriticalNotification(context, notificationManager, title, pendingIntent);
+            }
+        } catch (Exception e) {
+            this.doLogg("showNotification CRASHED: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 

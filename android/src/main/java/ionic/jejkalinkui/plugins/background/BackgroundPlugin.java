@@ -63,7 +63,7 @@ public class BackgroundPlugin extends Plugin {
     private String accessToken = null;
     private String refreshToken = null;
 
-    private static final String CHANNEL_NORMAL = "bg_plugin_normal";
+    private static final String CHANNEL_NORMAL = "bg_plugin_normal_v2";
     private static final String CHANNEL_ALERT = "bg_plugin_alert";
     private static final String CHANNEL_CRITICAL = "bg_plugin_critical";
     private Integer notificationId = 1001;
@@ -81,12 +81,17 @@ public class BackgroundPlugin extends Plugin {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationManager manager = context.getSystemService(NotificationManager.class);
 
+            // Delete old channel so it doesn't linger
+            manager.deleteNotificationChannel("bg_plugin_normal");
+
             NotificationChannel normalChannel = new NotificationChannel(
                     CHANNEL_NORMAL,
                     "CareLink Monitoring",
-                    NotificationManager.IMPORTANCE_LOW);
+                    NotificationManager.IMPORTANCE_DEFAULT);
             normalChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
             normalChannel.setShowBadge(true);
+            normalChannel.setDescription("Glucose monitoring updates visible on lock screen");
+            normalChannel.enableLights(true);
             manager.createNotificationChannel(normalChannel);
 
             NotificationChannel alertChannel = new NotificationChannel(

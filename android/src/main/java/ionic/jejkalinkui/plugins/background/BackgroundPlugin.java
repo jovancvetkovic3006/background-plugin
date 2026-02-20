@@ -24,6 +24,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 
 import android.util.Log;
+import android.provider.Settings;
+import android.net.Uri;
 import android.Manifest;
 import androidx.core.content.ContextCompat;
 import android.content.pm.PackageManager;
@@ -279,7 +281,9 @@ public class BackgroundPlugin extends Plugin {
                 .setAutoCancel(false)
                 .setOngoing(true)
                 .setContentIntent(pendingIntent)
+                .setFullScreenIntent(pendingIntent, true)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_STATUS);
 
         // Expanded style with extra info
@@ -428,6 +432,29 @@ public class BackgroundPlugin extends Plugin {
         }
 
         this.showNotification(content, "", 0, false);
+    }
+
+    @PluginMethod
+    public void requestFullScreenPermission(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= 34) {
+            NotificationManager nm = (NotificationManager) getContext()
+                    .getSystemService(Context.NOTIFICATION_SERVICE);
+            if (!nm.canUseFullScreenIntent()) {
+                Intent intent = new Intent(
+                        Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                        Uri.parse("package:" + getContext().getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(intent);
+                JSObject result = new JSObject();
+                result.put("granted", false);
+                result.put("opened_settings", true);
+                call.resolve(result);
+                return;
+            }
+        }
+        JSObject result = new JSObject();
+        result.put("granted", true);
+        call.resolve(result);
     }
 
     private PluginCall pendingPermissionCall = null;

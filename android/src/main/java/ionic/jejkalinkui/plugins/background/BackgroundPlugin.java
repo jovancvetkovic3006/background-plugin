@@ -564,6 +564,14 @@ public class BackgroundPlugin extends Plugin {
         call.resolve();
     }
 
+    @PluginMethod
+    public void getTokens(PluginCall call) {
+        JSObject result = new JSObject();
+        result.put("accessToken", this.accessToken != null ? this.accessToken : "");
+        result.put("refreshToken", this.refreshToken != null ? this.refreshToken : "");
+        call.resolve(result);
+    }
+
     private void refreshTokenSilently() {
         if (this.refreshToken == null) {
             this.doLogg("No refresh token available.");

@@ -65,7 +65,9 @@ public class BackgroundPlugin extends Plugin {
 
     private static final String CHANNEL_NORMAL = "bg_plugin_normal";
     private static final String CHANNEL_ALERT = "bg_plugin_alert";
+    private static final String CHANNEL_CRITICAL = "bg_plugin_critical";
     private Integer notificationId = 1001;
+    private static final int CRITICAL_NOTIFICATION_ID = 1002;
 
     private void startForegroundService() {
         Context context = getContext();
@@ -76,13 +78,28 @@ public class BackgroundPlugin extends Plugin {
                     CHANNEL_NORMAL,
                     "CareLink Monitoring",
                     NotificationManager.IMPORTANCE_LOW);
+            normalChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            normalChannel.setShowBadge(true);
             manager.createNotificationChannel(normalChannel);
 
             NotificationChannel alertChannel = new NotificationChannel(
                     CHANNEL_ALERT,
                     "CareLink Alerts",
                     NotificationManager.IMPORTANCE_HIGH);
+            alertChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            alertChannel.setShowBadge(true);
             manager.createNotificationChannel(alertChannel);
+
+            NotificationChannel criticalChannel = new NotificationChannel(
+                    CHANNEL_CRITICAL,
+                    "CareLink Critical Alerts",
+                    NotificationManager.IMPORTANCE_HIGH);
+            criticalChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            criticalChannel.setShowBadge(true);
+            criticalChannel.setBypassDnd(true);
+            criticalChannel.enableVibration(true);
+            criticalChannel.setVibrationPattern(new long[] { 0, 500, 200, 500, 200, 500 });
+            manager.createNotificationChannel(criticalChannel);
         }
     }
 
@@ -267,6 +284,30 @@ public class BackgroundPlugin extends Plugin {
         }
 
         notificationManager.notify(this.notificationId, builder.build());
+
+        // Fire a separate critical notification for low glycemia that bypasses DND
+        if (sgValue > 0 && sgValue < 4.5) {
+            showCriticalNotification(context, notificationManager, title, pendingIntent);
+        }
+    }
+
+    private void showCriticalNotification(Context context, NotificationManager notificationManager,
+            String title, PendingIntent tapIntent) {
+        NotificationCompat.Builder critical = new NotificationCompat.Builder(context, CHANNEL_CRITICAL)
+                .setContentTitle("\u26a0\ufe0f NISKA GLIKEMIJA!")
+                .setContentText(title)
+                .setSmallIcon(getNotificationIcon(context))
+                .setAutoCancel(true)
+                .setOngoing(false)
+                .setContentIntent(tapIntent)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setColor(Color.parseColor("#C62828"))
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setFullScreenIntent(tapIntent, true);
+
+        notificationManager.notify(CRITICAL_NOTIFICATION_ID, critical.build());
     }
 
     @PluginMethod

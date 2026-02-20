@@ -68,6 +68,13 @@ public class BackgroundPlugin extends Plugin {
     private static final String CHANNEL_CRITICAL = "bg_plugin_critical";
     private Integer notificationId = 1001;
     private static final int CRITICAL_NOTIFICATION_ID = 1002;
+    private static final int STATUS_NOTIFICATION_ID = 1003;
+
+    // State tracking for one-time alerts (true = alert already fired)
+    private boolean alertedReservoirLow = false;
+    private boolean alertedSensorExpiring = false;
+    private boolean alertedPumpBatteryLow = false;
+    private boolean alertedSensorBatteryLow = false;
 
     private void startForegroundService() {
         Context context = getContext();
@@ -229,6 +236,9 @@ public class BackgroundPlugin extends Plugin {
                 updateWidget(last.getString("sg"), trendArrow, since.trim(), statusText, sgValue);
             }
 
+            // Check for one-time status alerts
+            checkStatusAlerts(json);
+
             JSObject ret = new JSObject();
             ret.put("success", true);
             call.resolve(ret);
@@ -308,6 +318,100 @@ public class BackgroundPlugin extends Plugin {
                 .setFullScreenIntent(tapIntent, true);
 
         notificationManager.notify(CRITICAL_NOTIFICATION_ID, critical.build());
+    }
+
+    private void checkStatusAlerts(JSONObject json) {
+        try {
+            java.util.List<String> messages = new java.util.ArrayList<>();
+
+            // Reservoir < 20 units
+            double reservoir = json.optDouble("reservoirRemainingUnits", -1);
+            if (reservoir >= 0 && reservoir < 20) {
+                if (!alertedReservoirLow) {
+                    alertedReservoirLow = true;
+                    messages.add("Preostalo " + String.format(java.util.Locale.US, "%.0f", reservoir)
+                            + " jedinica u rezervoaru");
+                }
+            } else {
+                alertedReservoirLow = false;
+            }
+
+            // Sensor duration < 1 day (1440 minutes)
+            int sensorMinutes = json.optInt("sensorDurationMinutes", -1);
+            if (sensorMinutes >= 0 && sensorMinutes < 1440) {
+                if (!alertedSensorExpiring) {
+                    alertedSensorExpiring = true;
+                    int h = sensorMinutes / 60;
+                    int m = sensorMinutes % 60;
+                    messages.add("Senzor traje jos " + h + "h " + m + "m");
+                }
+            } else {
+                alertedSensorExpiring = false;
+            }
+
+            // Pump battery < 20%
+            int pumpBattery = json.optInt("conduitBatteryLevel", -1);
+            if (pumpBattery >= 0 && pumpBattery < 20) {
+                if (!alertedPumpBatteryLow) {
+                    alertedPumpBatteryLow = true;
+                    messages.add("Baterija pumpice: " + pumpBattery + "%");
+                }
+            } else {
+                alertedPumpBatteryLow = false;
+            }
+
+            // Sensor battery < 20%
+            int sensorBattery = json.optInt("gstBatteryLevel", -1);
+            if (sensorBattery >= 0 && sensorBattery < 20) {
+                if (!alertedSensorBatteryLow) {
+                    alertedSensorBatteryLow = true;
+                    messages.add("Baterija senzora: " + sensorBattery + "%");
+                }
+            } else {
+                alertedSensorBatteryLow = false;
+            }
+
+            if (!messages.isEmpty()) {
+                StringBuilder body = new StringBuilder();
+                for (String msg : messages) {
+                    if (body.length() > 0)
+                        body.append("\n");
+                    body.append(msg);
+                }
+                showStatusAlert(body.toString());
+            }
+        } catch (Exception e) {
+            Log.e("BackgroundPlugin", "checkStatusAlerts error", e);
+        }
+    }
+
+    private void showStatusAlert(String body) {
+        Context context = getContext();
+        NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+
+        Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+                context, 0, launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ALERT)
+                .setContentTitle("\u26a0 Upozorenje")
+                .setContentText(body)
+                .setSmallIcon(getNotificationIcon(context))
+                .setAutoCancel(true)
+                .setOngoing(false)
+                .setContentIntent(pendingIntent)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setColor(Color.parseColor("#E65100"))
+                .setDefaults(NotificationCompat.DEFAULT_SOUND | NotificationCompat.DEFAULT_VIBRATE);
+
+        if (body.contains("\n")) {
+            builder.setStyle(new NotificationCompat.BigTextStyle().bigText(body));
+        }
+
+        nm.notify(STATUS_NOTIFICATION_ID, builder.build());
     }
 
     @PluginMethod

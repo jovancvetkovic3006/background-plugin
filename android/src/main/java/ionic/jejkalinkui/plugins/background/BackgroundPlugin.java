@@ -65,6 +65,12 @@ public class BackgroundPlugin extends Plugin {
     private String accessToken = null;
     private String refreshToken = null;
 
+    private static final String TOKEN_PREFS = "bg_plugin_tokens";
+    private static final String PREF_ACCESS = "access_token";
+    private static final String PREF_REFRESH = "refresh_token";
+    private static final String OAUTH_AUDIENCE = "carepartner.patient.ous";
+    private static final int ACCESS_EXPIRY_BUFFER_SEC = 300;
+
     private static final String CHANNEL_NORMAL = "bg_plugin_normal_v2";
     private static final String CHANNEL_ALERT = "bg_plugin_alert";
     private static final String CHANNEL_CRITICAL = "bg_plugin_critical";
@@ -77,6 +83,86 @@ public class BackgroundPlugin extends Plugin {
     private boolean alertedSensorExpiring = false;
     private boolean alertedPumpBatteryLow = false;
     private boolean alertedSensorBatteryLow = false;
+
+    @Override
+    public void load() {
+        super.load();
+        loadPersistedTokens();
+    }
+
+    private void loadPersistedTokens() {
+        try {
+            android.content.SharedPreferences prefs = getContext()
+                    .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE);
+            String access = prefs.getString(PREF_ACCESS, null);
+            String refresh = prefs.getString(PREF_REFRESH, null);
+            if (access != null && !access.isEmpty()) {
+                this.accessToken = access;
+            }
+            if (refresh != null && !refresh.isEmpty()) {
+                this.refreshToken = refresh;
+            }
+            if (this.accessToken != null) {
+                this.doLogg("loadPersistedTokens: restored session");
+            }
+        } catch (Exception e) {
+            Log.e("BackgroundPlugin", "loadPersistedTokens failed", e);
+        }
+    }
+
+    private void persistTokens() {
+        try {
+            if (this.accessToken == null && this.refreshToken == null) {
+                return;
+            }
+            android.content.SharedPreferences.Editor editor = getContext()
+                    .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE)
+                    .edit();
+            if (this.accessToken != null) {
+                editor.putString(PREF_ACCESS, this.accessToken);
+            }
+            if (this.refreshToken != null) {
+                editor.putString(PREF_REFRESH, this.refreshToken);
+            }
+            editor.apply();
+        } catch (Exception e) {
+            Log.e("BackgroundPlugin", "persistTokens failed", e);
+        }
+    }
+
+    private void clearPersistedTokens() {
+        try {
+            getContext().getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE).edit().clear().apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private boolean isAccessTokenExpiringSoon(String token, int bufferSeconds) {
+        if (token == null || token.isEmpty()) {
+            return true;
+        }
+        try {
+            String[] parts = token.split("\\.");
+            if (parts.length < 2) {
+                return true;
+            }
+            String payload = parts[1];
+            int pad = (4 - payload.length() % 4) % 4;
+            for (int i = 0; i < pad; i++) {
+                payload += "=";
+            }
+            byte[] decoded = Base64.getUrlDecoder().decode(payload);
+            JSONObject obj = new JSONObject(new String(decoded, StandardCharsets.UTF_8));
+            if (!obj.has("exp")) {
+                return true;
+            }
+            long exp = obj.getLong("exp");
+            long now = System.currentTimeMillis() / 1000L;
+            return exp < (now + bufferSeconds);
+        } catch (Exception e) {
+            return true;
+        }
+    }
 
     private void startForegroundService() {
         Context context = getContext();
@@ -545,6 +631,7 @@ public class BackgroundPlugin extends Plugin {
 
         this.accessToken = access;
         this.refreshToken = refresh;
+        this.persistTokens();
         this.doLogg("setTokens: tokens updated from Ionic, fetching data immediately...");
 
         // Immediately fetch data with new tokens to update notification + widget
@@ -572,12 +659,17 @@ public class BackgroundPlugin extends Plugin {
         this.doLogg("Polling started");
         scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.scheduleWithFixedDelay(() -> {
-            this.doLogg("Polling: attempting token refresh");
             try {
-                refreshTokenSilently();
+                if (this.accessToken != null && this.refreshToken != null
+                        && !isAccessTokenExpiringSoon(this.accessToken, ACCESS_EXPIRY_BUFFER_SEC)) {
+                    this.doLogg("Polling: access token valid, fetching data");
+                    this.getData();
+                } else {
+                    this.doLogg("Polling: access token expiring or missing, refreshing");
+                    refreshTokenSilently();
+                }
             } catch (Exception e) {
-                this.doLogg("Polling: error token refresh");
-                this.doLogg(e.getMessage());
+                this.doLogg("Polling: error: " + e.getMessage());
             }
         }, 0, 2, TimeUnit.MINUTES);
 
@@ -626,10 +718,29 @@ public class BackgroundPlugin extends Plugin {
         call.resolve(result);
     }
 
-    private void refreshTokenSilently() {
+    @PluginMethod
+    public void requestTokenRefresh(PluginCall call) {
+        new Thread(() -> {
+            boolean ok;
+            if (this.accessToken != null && this.refreshToken != null
+                    && !isAccessTokenExpiringSoon(this.accessToken, ACCESS_EXPIRY_BUFFER_SEC)) {
+                ok = true;
+                this.doLogg("requestTokenRefresh: access token still valid");
+            } else {
+                ok = refreshTokenSilently();
+            }
+            JSObject result = new JSObject();
+            result.put("success", ok);
+            result.put("accessToken", this.accessToken != null ? this.accessToken : "");
+            result.put("refreshToken", this.refreshToken != null ? this.refreshToken : "");
+            call.resolve(result);
+        }).start();
+    }
+
+    private boolean refreshTokenSilently() {
         if (this.refreshToken == null) {
             this.doLogg("No refresh token available.");
-            return;
+            return false;
         }
 
         try {
@@ -646,6 +757,7 @@ public class BackgroundPlugin extends Plugin {
             body.append("&refresh_token=").append(URLEncoder.encode(this.refreshToken, "UTF-8"));
             body.append("&client_id=PeAhkbhQWlQRxJiQxWfcFBiGus1lxfe9");
             body.append("&redirect_uri=").append(URLEncoder.encode("com.medtronic.carepartner:/sso", "UTF-8"));
+            body.append("&audience=").append(URLEncoder.encode(OAUTH_AUDIENCE, "UTF-8"));
 
             OutputStream os = conn.getOutputStream();
             os.write(body.toString().getBytes());
@@ -671,16 +783,18 @@ public class BackgroundPlugin extends Plugin {
                     this.doLogg("Polling: success tokens: " + json.toString());
                     this.accessToken = json.getString("access_token");
                     this.refreshToken = json.optString("refresh_token", this.refreshToken);
+                    this.persistTokens();
 
-                    this.doLogg("Polling: success tokens: " + json.toString());
+                    this.doLogg("Polling: token refresh OK");
                     JSObject result = new JSObject();
                     result.put("access_token", this.accessToken);
                     result.put("refresh_token", this.refreshToken);
                     notifyListeners("onTokenRefreshed", result);
                     this.getData(); // fetch data after refresh
-                    this.doLogg("Token refreshed successfully");
+                    return true;
                 } catch (Exception e) {
                     this.doLogg("Polling: error parsing response: " + e.getMessage());
+                    return false;
                 }
 
             } else {
@@ -688,15 +802,10 @@ public class BackgroundPlugin extends Plugin {
                         + response.toString().substring(0, Math.min(200, response.length())));
                 Log.e("BackgroundPlugin", "Refresh failed: " + response.toString());
 
-                // Try getData with existing token — Ionic may have refreshed it already
-                if (this.accessToken != null) {
-                    this.doLogg("Polling: refresh failed, trying getData with existing token...");
-                    try {
-                        this.getData();
-                        return; // getData succeeded, no need to show error
-                    } catch (Exception e) {
-                        this.doLogg("Polling: getData with existing token also failed: " + e.getMessage());
-                    }
+                if (this.accessToken != null && !isAccessTokenExpiringSoon(this.accessToken, 60)) {
+                    this.doLogg("Polling: refresh failed, trying getData with existing access token...");
+                    this.getData();
+                    return true;
                 }
 
                 JSObject error = new JSObject();
@@ -707,11 +816,13 @@ public class BackgroundPlugin extends Plugin {
 
                 showNotification("Token istekao", "Otvorite aplikaciju za ponovnu prijavu", 0, false);
                 updateWidget("--", "", "Token istekao", "", 0);
+                return false;
             }
 
         } catch (Exception e) {
             this.doLogg("Polling: exception: " + e.getMessage());
             Log.e("BackgroundPlugin", "Exception in background refresh", e);
+            return false;
         }
     }
 
@@ -812,7 +923,23 @@ public class BackgroundPlugin extends Plugin {
                 int responseCode = conn.getResponseCode();
                 Log.i("BackgroundPlugin", "getData() response code: " + responseCode);
 
-                InputStream is = (responseCode == 200) ? conn.getInputStream() : conn.getErrorStream();
+                if (responseCode == 401) {
+                    this.doLogg("getData: 401 unauthorized — session expired");
+                    updateWidget("--", "", "Potrebna prijava", "", 0);
+                    JSObject authError = new JSObject();
+                    authError.put("error", "unauthorized");
+                    authError.put("status", 401);
+                    notifyListeners("onDataFetchError", authError);
+                    return;
+                }
+
+                if (responseCode != 200) {
+                    this.doLogg("getData: unexpected status " + responseCode);
+                    updateWidget("--", "", "Greska podataka", "", 0);
+                    return;
+                }
+
+                InputStream is = conn.getInputStream();
                 BufferedReader reader = new BufferedReader(new InputStreamReader(is));
 
                 StringBuilder response = new StringBuilder();

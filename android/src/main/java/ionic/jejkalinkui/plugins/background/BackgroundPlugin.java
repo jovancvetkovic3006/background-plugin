@@ -210,12 +210,12 @@ public class BackgroundPlugin extends Plugin {
 
         // Background circle color based on glucose level
         Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        if (sgValue < 4.5) {
-            bgPaint.setColor(Color.parseColor("#C62828")); // red - low
-        } else if (sgValue <= 7.5) {
-            bgPaint.setColor(Color.parseColor("#2E7D32")); // green - in range
+        if (sgValue < 3.9) {
+            bgPaint.setColor(Color.parseColor("#C2255C")); // red - low
+        } else if (sgValue <= 10.0) {
+            bgPaint.setColor(Color.parseColor("#0E9B8A")); // green - in range
         } else {
-            bgPaint.setColor(Color.parseColor("#E65100")); // orange - high
+            bgPaint.setColor(Color.parseColor("#C77C1E")); // orange - high
         }
         canvas.drawCircle(size / 2f, size / 2f, size / 2f, bgPaint);
 
@@ -277,7 +277,7 @@ public class BackgroundPlugin extends Plugin {
                 sensorConnected = json.optBoolean("conduitSensorInRange", false);
             }
 
-            boolean playSound = (sgValue < 4.5 || sgValue > 10.0);
+            boolean playSound = (sgValue < 3.9 || sgValue > 10.0);
 
             if (!sensorConnected) {
                 showNotification("Senzor nije povezan", "", 0, false);
@@ -286,7 +286,7 @@ public class BackgroundPlugin extends Plugin {
                 String trendArrow = getTrendArrow(json);
                 String title = last.getString("sg") + " mmol/L" + trendArrow + "  \u00b7  " + since.trim();
                 String statusText = "";
-                if (sgValue < 4.5)
+                if (sgValue < 3.9)
                     statusText = "\u2757 Niska glikemija!";
                 else if (sgValue > 10.0)
                     statusText = "\u26a1 Visoka glikemija!";
@@ -374,12 +374,12 @@ public class BackgroundPlugin extends Plugin {
 
             // Color based on glucose level
             int accentColor;
-            if (sgValue < 4.5) {
-                accentColor = Color.parseColor("#C62828");
-            } else if (sgValue <= 7.5) {
-                accentColor = Color.parseColor("#2E7D32");
+            if (sgValue < 3.9) {
+                accentColor = Color.parseColor("#C2255C");
+            } else if (sgValue <= 10.0) {
+                accentColor = Color.parseColor("#0E9B8A");
             } else {
-                accentColor = Color.parseColor("#E65100");
+                accentColor = Color.parseColor("#C77C1E");
             }
 
             // Large icon with glucose value
@@ -409,7 +409,7 @@ public class BackgroundPlugin extends Plugin {
             this.doLogg("showNotification: notified OK");
 
             // Fire a separate critical notification for low glycemia that bypasses DND
-            if (sgValue > 0 && sgValue < 4.5) {
+            if (sgValue > 0 && sgValue < 3.9) {
                 showCriticalNotification(context, notificationManager, title, pendingIntent);
             }
         } catch (Exception e) {
@@ -430,7 +430,7 @@ public class BackgroundPlugin extends Plugin {
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
-                .setColor(Color.parseColor("#C62828"))
+                .setColor(Color.parseColor("#C2255C"))
                 .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .setFullScreenIntent(tapIntent, true);
 
@@ -521,7 +521,7 @@ public class BackgroundPlugin extends Plugin {
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setCategory(NotificationCompat.CATEGORY_STATUS)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setColor(Color.parseColor("#E65100"))
+                .setColor(Color.parseColor("#C77C1E"))
                 .setDefaults(NotificationCompat.DEFAULT_SOUND | NotificationCompat.DEFAULT_VIBRATE);
 
         if (body.contains("\n")) {
@@ -982,7 +982,7 @@ public class BackgroundPlugin extends Plugin {
                 }
 
                 boolean sensorConnected = nestedPatientData.optBoolean("conduitSensorInRange", false);
-                boolean playSound = (sg < 4.5 || sg > 10.0);
+                boolean playSound = (sg < 3.9 || sg > 10.0);
 
                 if (!sensorConnected) {
                     showNotification("Senzor nije povezan", "", 0, false);
@@ -991,7 +991,7 @@ public class BackgroundPlugin extends Plugin {
                     String trendArrow = getTrendArrow(nestedPatientData);
                     String title = last.optString("sg", "0") + " mmol/L" + trendArrow + "  \u00b7  " + timeSince.trim();
                     String statusText = "";
-                    if (sg < 4.5)
+                    if (sg < 3.9)
                         statusText = "\u2757 Niska glikemija!";
                     else if (sg > 10.0)
                         statusText = "\u26a1 Visoka glikemija!";
@@ -1140,7 +1140,7 @@ public class BackgroundPlugin extends Plugin {
 
             if (sgObject != null && sgObject.has("sg")) {
                 int sgMg = sgObject.optInt("sg", 0);
-                double sgMmol = sgMg / 18.0;
+                double sgMmol = sgMg / 18.0182;
 
                 // extract raw timestamp
                 long rawTimestamp = 0;

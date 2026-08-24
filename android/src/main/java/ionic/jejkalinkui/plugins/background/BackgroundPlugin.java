@@ -33,7 +33,15 @@ import androidx.core.app.ActivityCompat;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import java.lang.ref.WeakReference;
+
+import java.util.Calendar;
+
+import androidx.core.content.ContextCompat;
 
 import java.io.OutputStream;
 import java.io.InputStream;
@@ -61,9 +69,35 @@ import java.util.ArrayList;
 @CapacitorPlugin(name = "Background")
 public class BackgroundPlugin extends Plugin {
 
-    private ScheduledExecutorService scheduler = null;
-    private String accessToken = null;
-    private String refreshToken = null;
+    private static ScheduledExecutorService scheduler = null;
+    private static ScheduledFuture<?> nextPollFuture = null;
+    private static final Object SCHEDULER_LOCK = new Object();
+    private static final AtomicBoolean pollInFlight = new AtomicBoolean(false);
+
+    private static final String PREF_POLL_INTERVAL = "poll_interval_min";
+    private static final String PREF_FAILURE_ALERT_AT = "failure_alert_at";
+    private static final String PREF_PATIENT_USERNAME = "patient_username";
+    private static final String PREF_CONSECUTIVE_FAILURES = "consecutive_failures";
+    private static final String PREF_LAST_READING_MS = "last_reading_ms";
+    private static final String PREF_COLLECTOR_ALERT_FIRED = "collector_alert_fired";
+    private static final int PHASE_MINUTE = 2;
+    private static final int PHASE_OFFSET_SEC = 30;
+
+    private static volatile int pollIntervalMin = 5;
+    private static volatile int failureAlertAt = 3;
+    private static volatile String patientUsername = "jejka3006";
+    private static volatile int consecutiveFailures = 0;
+    private static volatile long lastReadingTsMs = 0;
+    private static volatile long backoffUntilMs = 0;
+    private static volatile boolean collectorAlertFired = false;
+
+    private static volatile String accessToken = null;
+    private static volatile String refreshToken = null;
+    private static volatile Context appContext = null;
+    private static WeakReference<BackgroundPlugin> pluginRef = null;
+
+    /** Detached host so polls keep working after the Capacitor Bridge is destroyed. */
+    private static final BackgroundPlugin HEADLESS = new BackgroundPlugin();
 
     private static final String TOKEN_PREFS = "bg_plugin_tokens";
     private static final String PREF_ACCESS = "access_token";
@@ -74,35 +108,159 @@ public class BackgroundPlugin extends Plugin {
     private static final String CHANNEL_NORMAL = "bg_plugin_normal_v2";
     private static final String CHANNEL_ALERT = "bg_plugin_alert";
     private static final String CHANNEL_CRITICAL = "bg_plugin_critical";
-    private Integer notificationId = 1001;
+    private static final int NOTIFICATION_ID = ForegroundService.NOTIFICATION_ID;
     private static final int CRITICAL_NOTIFICATION_ID = 1002;
     private static final int STATUS_NOTIFICATION_ID = 1003;
+    private static final int ALARM_NOTIFICATION_BASE = 2100;
+
+    private static final String PREF_ALARM_LOW = "alarm_low";
+    private static final String PREF_ALARM_HIGH = "alarm_high";
+    private static final String PREF_ALARM_URGENT = "alarm_urgent_low";
+
+    // User thresholds from Ionic Alarms settings (mmol/L)
+    private static volatile double alarmLow = 3.9;
+    private static volatile double alarmHigh = 10.0;
+    private static volatile double alarmUrgentLow = 3.0;
 
     // State tracking for one-time alerts (true = alert already fired)
-    private boolean alertedReservoirLow = false;
-    private boolean alertedSensorExpiring = false;
-    private boolean alertedPumpBatteryLow = false;
-    private boolean alertedSensorBatteryLow = false;
+    private static boolean alertedReservoirLow = false;
+    private static boolean alertedSensorExpiring = false;
+    private static boolean alertedPumpBatteryLow = false;
+    private static boolean alertedSensorBatteryLow = false;
 
     @Override
     public void load() {
         super.load();
+        pluginRef = new WeakReference<>(this);
+        try {
+            appContext = getContext().getApplicationContext();
+        } catch (Exception ignored) {
+        }
         loadPersistedTokens();
+        loadPersistedAlarmThresholds();
+        loadPersistedCollectorConfig();
+    }
+
+    private void loadPersistedCollectorConfig() {
+        try {
+            Context context = ctx();
+            if (context == null) {
+                return;
+            }
+            android.content.SharedPreferences prefs = context
+                    .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE);
+            pollIntervalMin = Math.max(5, Math.min(15, prefs.getInt(PREF_POLL_INTERVAL, 5)));
+            failureAlertAt = Math.max(1, Math.min(20, prefs.getInt(PREF_FAILURE_ALERT_AT, 3)));
+            patientUsername = prefs.getString(PREF_PATIENT_USERNAME, "jejka3006");
+            if (patientUsername == null || patientUsername.isEmpty()) {
+                patientUsername = "jejka3006";
+            }
+            consecutiveFailures = prefs.getInt(PREF_CONSECUTIVE_FAILURES, 0);
+            lastReadingTsMs = prefs.getLong(PREF_LAST_READING_MS, 0);
+            collectorAlertFired = prefs.getBoolean(PREF_COLLECTOR_ALERT_FIRED, false);
+        } catch (Exception e) {
+            this.doLogg("loadPersistedCollectorConfig failed: " + e.getMessage());
+        }
+    }
+
+    private void persistCollectorState() {
+        try {
+            Context context = ctx();
+            if (context == null) {
+                return;
+            }
+            context.getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE).edit()
+                    .putInt(PREF_POLL_INTERVAL, pollIntervalMin)
+                    .putInt(PREF_FAILURE_ALERT_AT, failureAlertAt)
+                    .putString(PREF_PATIENT_USERNAME, patientUsername)
+                    .putInt(PREF_CONSECUTIVE_FAILURES, consecutiveFailures)
+                    .putLong(PREF_LAST_READING_MS, lastReadingTsMs)
+                    .putBoolean(PREF_COLLECTOR_ALERT_FIRED, collectorAlertFired)
+                    .apply();
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        // Keep FGS + scheduler alive; only drop the bridge-bound reference.
+        if (pluginRef != null && pluginRef.get() == this) {
+            pluginRef.clear();
+        }
+        super.handleOnDestroy();
+    }
+
+    private static BackgroundPlugin host() {
+        BackgroundPlugin live = pluginRef != null ? pluginRef.get() : null;
+        return live != null ? live : HEADLESS;
+    }
+
+    private Context ctx() {
+        try {
+            Context c = getContext();
+            if (c != null) {
+                return c;
+            }
+        } catch (Exception ignored) {
+        }
+        BackgroundPlugin live = pluginRef != null ? pluginRef.get() : null;
+        if (live != null && live != this) {
+            try {
+                Context c = live.getContext();
+                if (c != null) {
+                    return c;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        return appContext;
+    }
+
+    private void safeNotify(String event, JSObject data) {
+        BackgroundPlugin live = pluginRef != null ? pluginRef.get() : null;
+        if (live == null) {
+            return;
+        }
+        try {
+            live.notifyListeners(event, data);
+        } catch (Exception e) {
+            Log.d("BackgroundPlugin", "safeNotify " + event + ": " + e.getMessage());
+        }
+    }
+
+    private void loadPersistedAlarmThresholds() {
+        try {
+            Context context = ctx();
+            if (context == null) {
+                return;
+            }
+            android.content.SharedPreferences prefs = context
+                    .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE);
+            alarmLow = prefs.getFloat(PREF_ALARM_LOW, 3.9f);
+            alarmHigh = prefs.getFloat(PREF_ALARM_HIGH, 10.0f);
+            alarmUrgentLow = prefs.getFloat(PREF_ALARM_URGENT, 3.0f);
+        } catch (Exception e) {
+            this.doLogg("loadPersistedAlarmThresholds failed: " + e.getMessage());
+        }
     }
 
     private void loadPersistedTokens() {
         try {
-            android.content.SharedPreferences prefs = getContext()
+            Context context = ctx();
+            if (context == null) {
+                return;
+            }
+            android.content.SharedPreferences prefs = context
                     .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE);
             String access = prefs.getString(PREF_ACCESS, null);
             String refresh = prefs.getString(PREF_REFRESH, null);
             if (access != null && !access.isEmpty()) {
-                this.accessToken = access;
+                accessToken = access;
             }
             if (refresh != null && !refresh.isEmpty()) {
-                this.refreshToken = refresh;
+                refreshToken = refresh;
             }
-            if (this.accessToken != null) {
+            if (accessToken != null) {
                 this.doLogg("loadPersistedTokens: restored session");
             }
         } catch (Exception e) {
@@ -112,17 +270,21 @@ public class BackgroundPlugin extends Plugin {
 
     private void persistTokens() {
         try {
-            if (this.accessToken == null && this.refreshToken == null) {
+            if (accessToken == null && refreshToken == null) {
                 return;
             }
-            android.content.SharedPreferences.Editor editor = getContext()
+            Context context = ctx();
+            if (context == null) {
+                return;
+            }
+            android.content.SharedPreferences.Editor editor = context
                     .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE)
                     .edit();
-            if (this.accessToken != null) {
-                editor.putString(PREF_ACCESS, this.accessToken);
+            if (accessToken != null) {
+                editor.putString(PREF_ACCESS, accessToken);
             }
-            if (this.refreshToken != null) {
-                editor.putString(PREF_REFRESH, this.refreshToken);
+            if (refreshToken != null) {
+                editor.putString(PREF_REFRESH, refreshToken);
             }
             editor.apply();
         } catch (Exception e) {
@@ -132,7 +294,11 @@ public class BackgroundPlugin extends Plugin {
 
     private void clearPersistedTokens() {
         try {
-            getContext().getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE).edit().clear().apply();
+            Context context = ctx();
+            if (context == null) {
+                return;
+            }
+            context.getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE).edit().clear().apply();
         } catch (Exception ignored) {
         }
     }
@@ -164,42 +330,221 @@ public class BackgroundPlugin extends Plugin {
         }
     }
 
-    private void startForegroundService() {
-        Context context = getContext();
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationManager manager = context.getSystemService(NotificationManager.class);
+    /** Create notification channels (does not start the FGS). */
+    private void ensureNotificationChannels() {
+        Context context = ctx();
+        if (context == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+        NotificationManager manager = context.getSystemService(NotificationManager.class);
+        if (manager == null) {
+            return;
+        }
 
-            // Delete old channel so it doesn't linger
-            manager.deleteNotificationChannel("bg_plugin_normal");
+        // Delete old channel so it doesn't linger
+        manager.deleteNotificationChannel("bg_plugin_normal");
 
-            NotificationChannel normalChannel = new NotificationChannel(
-                    CHANNEL_NORMAL,
-                    "CareLink Monitoring",
-                    NotificationManager.IMPORTANCE_DEFAULT);
-            normalChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-            normalChannel.setShowBadge(true);
-            normalChannel.setDescription("Glucose monitoring updates visible on lock screen");
-            normalChannel.enableLights(true);
-            manager.createNotificationChannel(normalChannel);
+        NotificationChannel normalChannel = new NotificationChannel(
+                CHANNEL_NORMAL,
+                "CareLink Monitoring",
+                NotificationManager.IMPORTANCE_DEFAULT);
+        normalChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        normalChannel.setShowBadge(true);
+        normalChannel.setDescription("Glucose monitoring updates visible on lock screen");
+        normalChannel.enableLights(true);
+        manager.createNotificationChannel(normalChannel);
 
-            NotificationChannel alertChannel = new NotificationChannel(
-                    CHANNEL_ALERT,
-                    "CareLink Alerts",
-                    NotificationManager.IMPORTANCE_HIGH);
-            alertChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-            alertChannel.setShowBadge(true);
-            manager.createNotificationChannel(alertChannel);
+        NotificationChannel alertChannel = new NotificationChannel(
+                CHANNEL_ALERT,
+                "CareLink Alerts",
+                NotificationManager.IMPORTANCE_HIGH);
+        alertChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        alertChannel.setShowBadge(true);
+        manager.createNotificationChannel(alertChannel);
 
-            NotificationChannel criticalChannel = new NotificationChannel(
-                    CHANNEL_CRITICAL,
-                    "CareLink Critical Alerts",
-                    NotificationManager.IMPORTANCE_HIGH);
-            criticalChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-            criticalChannel.setShowBadge(true);
-            criticalChannel.setBypassDnd(true);
-            criticalChannel.enableVibration(true);
-            criticalChannel.setVibrationPattern(new long[] { 0, 500, 200, 500, 200, 500 });
-            manager.createNotificationChannel(criticalChannel);
+        NotificationChannel criticalChannel = new NotificationChannel(
+                CHANNEL_CRITICAL,
+                "CareLink Critical Alerts",
+                NotificationManager.IMPORTANCE_HIGH);
+        criticalChannel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        criticalChannel.setShowBadge(true);
+        criticalChannel.setBypassDnd(true);
+        criticalChannel.enableVibration(true);
+        criticalChannel.setVibrationPattern(new long[] { 0, 500, 200, 500, 200, 500 });
+        manager.createNotificationChannel(criticalChannel);
+    }
+
+    /** Called from {@link ForegroundService} after startForeground. */
+    public static void startBackgroundPolling(Context context) {
+        if (context != null) {
+            appContext = context.getApplicationContext();
+        }
+        BackgroundPlugin h = host();
+        h.loadPersistedTokens();
+        h.loadPersistedAlarmThresholds();
+        h.loadPersistedCollectorConfig();
+        h.ensureNotificationChannels();
+
+        synchronized (SCHEDULER_LOCK) {
+            if (scheduler != null && !scheduler.isShutdown()) {
+                h.scheduleNextPoll(0);
+                return;
+            }
+            Log.i("BackgroundPlugin", "Starting phase-aligned poll scheduler");
+            scheduler = Executors.newSingleThreadScheduledExecutor();
+            h.scheduleNextPoll(0);
+        }
+    }
+
+    public static void stopBackgroundPolling() {
+        synchronized (SCHEDULER_LOCK) {
+            if (nextPollFuture != null) {
+                nextPollFuture.cancel(false);
+                nextPollFuture = null;
+            }
+            if (scheduler != null) {
+                scheduler.shutdownNow();
+                scheduler = null;
+                Log.i("BackgroundPlugin", "Background poll scheduler stopped");
+            }
+        }
+    }
+
+    private void scheduleNextPoll(long delayMs) {
+        synchronized (SCHEDULER_LOCK) {
+            if (scheduler == null || scheduler.isShutdown()) {
+                return;
+            }
+            if (nextPollFuture != null) {
+                nextPollFuture.cancel(false);
+            }
+            if (delayMs < 0) {
+                delayMs = computeNextPollDelayMs();
+            }
+            delayMs = Math.max(1000L, delayMs);
+            nextPollFuture = scheduler.schedule(() -> {
+                try {
+                    pollTick();
+                } catch (Exception e) {
+                    Log.e("BackgroundPlugin", "Poll tick failed", e);
+                } finally {
+                    scheduleNextPoll(-1);
+                }
+            }, delayMs, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private long computeNextPollDelayMs() {
+        long now = System.currentTimeMillis();
+        if (backoffUntilMs > now) {
+            return backoffUntilMs - now;
+        }
+        if (lastReadingTsMs > 0) {
+            long target = lastReadingTsMs + pollIntervalMin * 60_000L + PHASE_OFFSET_SEC * 1000L;
+            if (target > now) {
+                return target - now;
+            }
+        }
+        return nextPhaseSlotMs(now) - now;
+    }
+
+    /** Next sensor-aligned slot (:02 + 30s within poll interval). */
+    private long nextPhaseSlotMs(long now) {
+        Calendar cal = Calendar.getInstance();
+        cal.setTimeInMillis(now);
+        for (int i = 0; i < 24 * 60; i++) {
+            if (i > 0) {
+                cal.add(Calendar.MINUTE, 1);
+            }
+            int minute = cal.get(Calendar.MINUTE);
+            if ((minute - PHASE_MINUTE + 60) % pollIntervalMin != 0) {
+                continue;
+            }
+            cal.set(Calendar.SECOND, PHASE_OFFSET_SEC);
+            cal.set(Calendar.MILLISECOND, 0);
+            long target = cal.getTimeInMillis();
+            if (target > now + 2000L) {
+                return target;
+            }
+        }
+        return now + pollIntervalMin * 60_000L + PHASE_OFFSET_SEC * 1000L;
+    }
+
+    private void recordPollSuccess(long readingTsMs) {
+        consecutiveFailures = 0;
+        backoffUntilMs = 0;
+        collectorAlertFired = false;
+        if (readingTsMs > 0) {
+            lastReadingTsMs = readingTsMs;
+        }
+        persistCollectorState();
+    }
+
+    private void recordPollFailure(String reason) {
+        consecutiveFailures++;
+        int exp = Math.min(consecutiveFailures, 6);
+        int backoffMin = Math.min(pollIntervalMin * (1 << exp), 60);
+        backoffUntilMs = System.currentTimeMillis() + backoffMin * 60_000L;
+        persistCollectorState();
+        this.doLogg("Poll failure #" + consecutiveFailures + " backoff " + backoffMin + "m: " + reason);
+        if (consecutiveFailures >= failureAlertAt && !collectorAlertFired) {
+            collectorAlertFired = true;
+            persistCollectorState();
+            fireCollectorFailureAlert(consecutiveFailures);
+        }
+    }
+
+    private void fireCollectorFailureAlert(int failures) {
+        try {
+            Context context = ctx();
+            if (context == null) {
+                return;
+            }
+            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            Intent intent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+            PendingIntent pending = PendingIntent.getActivity(
+                    context, 0, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ALERT)
+                    .setContentTitle("Collector failing")
+                    .setContentText(failures + " consecutive CareLink failures. Open the app to check session.")
+                    .setSmallIcon(getNotificationIcon(context))
+                    .setAutoCancel(true)
+                    .setContentIntent(pending)
+                    .setPriority(NotificationCompat.PRIORITY_HIGH);
+            nm.notify(STATUS_NOTIFICATION_ID + 1, builder.build());
+        } catch (Exception e) {
+            Log.e("BackgroundPlugin", "fireCollectorFailureAlert failed", e);
+        }
+    }
+
+    /** Notification Refresh action / manual poke. */
+    public static void requestImmediatePoll() {
+        new Thread(() -> {
+            try {
+                host().pollTick();
+            } catch (Exception e) {
+                Log.e("BackgroundPlugin", "Immediate poll failed", e);
+            }
+        }, "carelink-immediate-poll").start();
+    }
+
+    private void pollTick() {
+        if (!pollInFlight.compareAndSet(false, true)) {
+            this.doLogg("Polling: skip overlapping tick");
+            return;
+        }
+        try {
+            if (accessToken != null && refreshToken != null
+                    && !isAccessTokenExpiringSoon(accessToken, ACCESS_EXPIRY_BUFFER_SEC)) {
+                this.doLogg("Polling: access token valid, fetching data");
+                this.getData();
+            } else {
+                this.doLogg("Polling: access token expiring or missing, refreshing");
+                refreshTokenSilently();
+            }
+        } finally {
+            pollInFlight.set(false);
         }
     }
 
@@ -208,14 +553,16 @@ public class BackgroundPlugin extends Plugin {
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
 
-        // Background circle color based on glucose level
+        // Background circle color based on glucose level (user thresholds)
         Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        if (sgValue < 3.9) {
+        if (sgValue > 0 && sgValue < alarmLow) {
             bgPaint.setColor(Color.parseColor("#C2255C")); // red - low
-        } else if (sgValue <= 10.0) {
+        } else if (sgValue > 0 && sgValue <= alarmHigh) {
             bgPaint.setColor(Color.parseColor("#0E9B8A")); // green - in range
-        } else {
+        } else if (sgValue > 0) {
             bgPaint.setColor(Color.parseColor("#C77C1E")); // orange - high
+        } else {
+            bgPaint.setColor(Color.parseColor("#6C757D"));
         }
         canvas.drawCircle(size / 2f, size / 2f, size / 2f, bgPaint);
 
@@ -277,19 +624,21 @@ public class BackgroundPlugin extends Plugin {
                 sensorConnected = json.optBoolean("conduitSensorInRange", false);
             }
 
-            boolean playSound = (sgValue < 3.9 || sgValue > 10.0);
+            boolean playSound = (sgValue < alarmLow || sgValue > alarmHigh);
 
             if (!sensorConnected) {
-                showNotification("Senzor nije povezan", "", 0, false);
-                updateWidget("--", "", "Senzor nije povezan", "", 0);
+                showNotification("Sensor disconnected", "", 0, false);
+                updateWidget("--", "", "Sensor disconnected", "", 0);
             } else {
                 String trendArrow = getTrendArrow(json);
                 String title = last.getString("sg") + " mmol/L" + trendArrow + "  \u00b7  " + since.trim();
                 String statusText = "";
-                if (sgValue < 3.9)
-                    statusText = "\u2757 Niska glikemija!";
-                else if (sgValue > 10.0)
-                    statusText = "\u26a1 Visoka glikemija!";
+                if (sgValue < alarmUrgentLow)
+                    statusText = "Urgent low";
+                else if (sgValue < alarmLow)
+                    statusText = "Low glucose";
+                else if (sgValue > alarmHigh)
+                    statusText = "High glucose";
                 // Build body with status + details
                 StringBuilder body = new StringBuilder();
                 if (!statusText.isEmpty()) {
@@ -302,7 +651,7 @@ public class BackgroundPlugin extends Plugin {
                     Log.i("BackgroundPlugin", "activeInsulin from Ionic: " + (ai != null ? ai.toString() : "null"));
                     if (ai != null) {
                         double amount = ai.optDouble("amount", 0);
-                        details.append("Aktivni insulin: ")
+                        details.append("Active insulin: ")
                                 .append(String.format(java.util.Locale.US, "%.1f", amount)).append(" U");
                     }
                 } catch (Exception ignored) {
@@ -311,14 +660,14 @@ public class BackgroundPlugin extends Plugin {
                 if (reservoir >= 0) {
                     if (details.length() > 0)
                         details.append("\n");
-                    details.append("Rezervoar: ")
+                    details.append("Reservoir: ")
                             .append(String.format(java.util.Locale.US, "%.0f", reservoir)).append(" U");
                 }
                 boolean isTempBasal = json.optBoolean("isTempBasal", false);
                 if (isTempBasal) {
                     if (details.length() > 0)
                         details.append("\n");
-                    details.append("Temporalni bazal: aktivan");
+                    details.append("Temp basal: active");
                 }
                 if (details.length() > 0) {
                     if (body.length() > 0)
@@ -344,7 +693,7 @@ public class BackgroundPlugin extends Plugin {
 
     private void showNotification(String title, String body, double sgValue, boolean playSound) {
         try {
-            Context context = getContext();
+            Context context = ctx();
             if (context == null) {
                 this.doLogg("showNotification: context is null, skipping");
                 return;
@@ -354,10 +703,7 @@ public class BackgroundPlugin extends Plugin {
                     .getSystemService(Context.NOTIFICATION_SERVICE);
 
             String channelId = playSound ? CHANNEL_ALERT : CHANNEL_NORMAL;
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService();
-            }
+            ensureNotificationChannels();
 
             // Open app on tap
             Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
@@ -372,14 +718,16 @@ public class BackgroundPlugin extends Plugin {
                     context, 0, refreshIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-            // Color based on glucose level
+            // Color based on glucose level (user thresholds)
             int accentColor;
-            if (sgValue < 3.9) {
+            if (sgValue > 0 && sgValue < alarmLow) {
                 accentColor = Color.parseColor("#C2255C");
-            } else if (sgValue <= 10.0) {
+            } else if (sgValue > 0 && sgValue <= alarmHigh) {
                 accentColor = Color.parseColor("#0E9B8A");
-            } else {
+            } else if (sgValue > 0) {
                 accentColor = Color.parseColor("#C77C1E");
+            } else {
+                accentColor = Color.parseColor("#6C757D");
             }
 
             // Large icon with glucose value
@@ -392,11 +740,12 @@ public class BackgroundPlugin extends Plugin {
                     .setLargeIcon(largeIcon)
                     .setAutoCancel(false)
                     .setOngoing(true)
+                    .setOnlyAlertOnce(!playSound)
                     .setContentIntent(pendingIntent)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setColor(accentColor)
-                    .addAction(android.R.drawable.ic_popup_sync, "Osveži", refreshPending);
+                    .addAction(android.R.drawable.ic_popup_sync, "Refresh", refreshPending);
 
             // Expanded style with extra info
             if (body != null && !body.isEmpty()) {
@@ -405,12 +754,14 @@ public class BackgroundPlugin extends Plugin {
                         .setBigContentTitle(title));
             }
 
-            notificationManager.notify(this.notificationId, builder.build());
+            notificationManager.notify(NOTIFICATION_ID, builder.build());
             this.doLogg("showNotification: notified OK");
 
-            // Fire a separate critical notification for low glycemia that bypasses DND
-            if (sgValue > 0 && sgValue < 3.9) {
-                showCriticalNotification(context, notificationManager, title, pendingIntent);
+            // When Ionic bridge is gone, deliver a critical backup for lows (AlarmsService can't run).
+            boolean bridgeAlive = pluginRef != null && pluginRef.get() != null;
+            if (!bridgeAlive && sgValue > 0 && sgValue < alarmLow) {
+                String critTitle = sgValue < alarmUrgentLow ? "Urgent low" : "Low glucose";
+                showCriticalNotification(context, notificationManager, critTitle, title, pendingIntent);
             }
         } catch (Exception e) {
             this.doLogg("showNotification CRASHED: " + e.getMessage());
@@ -419,10 +770,10 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void showCriticalNotification(Context context, NotificationManager notificationManager,
-            String title, PendingIntent tapIntent) {
+            String critTitle, String detail, PendingIntent tapIntent) {
         NotificationCompat.Builder critical = new NotificationCompat.Builder(context, CHANNEL_CRITICAL)
-                .setContentTitle("\u26a0\ufe0f NISKA GLIKEMIJA!")
-                .setContentText(title)
+                .setContentTitle(critTitle)
+                .setContentText(detail)
                 .setSmallIcon(getNotificationIcon(context))
                 .setAutoCancel(true)
                 .setOngoing(false)
@@ -437,6 +788,127 @@ public class BackgroundPlugin extends Plugin {
         notificationManager.notify(CRITICAL_NOTIFICATION_ID, critical.build());
     }
 
+    /**
+     * Fire a rule-based alarm from Ionic AlarmsService (user thresholds / projection / stale).
+     * critical=true → DND-bypass channel.
+     */
+    @PluginMethod
+    public void fireAlarmAlert(PluginCall call) {
+        try {
+            Context context = ctx();
+            if (context == null) {
+                call.reject("No context");
+                return;
+            }
+            String title = call.getString("title", "Alarm");
+            String body = call.getString("body", "");
+            boolean critical = call.getBoolean("critical", false);
+            String rule = call.getString("rule", "alarm");
+
+            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            Intent intent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+            PendingIntent pendingIntent = PendingIntent.getActivity(
+                    context, 0, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+            String channelId = critical ? CHANNEL_CRITICAL : CHANNEL_ALERT;
+            int notifId = ALARM_NOTIFICATION_BASE + Math.abs(rule.hashCode() % 80);
+
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
+                    .setContentTitle(title)
+                    .setContentText(body == null || body.isEmpty() ? title : body)
+                    .setSmallIcon(getNotificationIcon(context))
+                    .setAutoCancel(true)
+                    .setOngoing(false)
+                    .setContentIntent(pendingIntent)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setCategory(NotificationCompat.CATEGORY_ALARM)
+                    .setPriority(critical ? NotificationCompat.PRIORITY_MAX : NotificationCompat.PRIORITY_HIGH)
+                    .setDefaults(NotificationCompat.DEFAULT_ALL);
+
+            if (body != null && !body.isEmpty()) {
+                builder.setStyle(new NotificationCompat.BigTextStyle().bigText(body).setBigContentTitle(title));
+            }
+            if (critical) {
+                builder.setFullScreenIntent(pendingIntent, true);
+                builder.setColor(Color.parseColor("#C2255C"));
+            }
+
+            nm.notify(notifId, builder.build());
+            this.doLogg("fireAlarmAlert: " + rule + " critical=" + critical);
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("fireAlarmAlert failed: " + e.getMessage());
+        }
+    }
+
+    /** Persist / apply user alarm thresholds from Ionic Settings/Alarms. */
+    @PluginMethod
+    public void setAlarmThresholds(PluginCall call) {
+        try {
+            Double low = call.getDouble("low");
+            Double high = call.getDouble("high");
+            Double urgent = call.getDouble("urgentLow");
+            if (low != null)
+                alarmLow = low;
+            if (high != null)
+                alarmHigh = high;
+            if (urgent != null)
+                alarmUrgentLow = urgent;
+
+            Context context = ctx();
+            if (context == null) {
+                call.reject("No context");
+                return;
+            }
+            android.content.SharedPreferences prefs = context
+                    .getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE);
+            prefs.edit()
+                    .putFloat(PREF_ALARM_LOW, (float) alarmLow)
+                    .putFloat(PREF_ALARM_HIGH, (float) alarmHigh)
+                    .putFloat(PREF_ALARM_URGENT, (float) alarmUrgentLow)
+                    .apply();
+
+            this.doLogg("setAlarmThresholds: low=" + alarmLow + " high=" + alarmHigh + " urgent=" + alarmUrgentLow);
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("setAlarmThresholds failed: " + e.getMessage());
+        }
+    }
+
+    /** Persist collector settings from Ionic Settings. Reschedules polls when interval changes. */
+    @PluginMethod
+    public void setCollectorConfig(PluginCall call) {
+        try {
+            Integer interval = call.getInt("pollIntervalMin");
+            Integer alertAt = call.getInt("failureAlertAt");
+            String patient = call.getString("patientUsername");
+            if (interval != null) {
+                pollIntervalMin = Math.max(5, Math.min(15, interval));
+            }
+            if (alertAt != null) {
+                failureAlertAt = Math.max(1, Math.min(20, alertAt));
+            }
+            if (patient != null && !patient.trim().isEmpty()) {
+                patientUsername = patient.trim();
+            }
+            persistCollectorState();
+            this.doLogg("setCollectorConfig: interval=" + pollIntervalMin + "m alertAt="
+                    + failureAlertAt + " patient=" + patientUsername);
+            scheduleNextPoll(0);
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("setCollectorConfig failed: " + e.getMessage());
+        }
+    }
+
     private void checkStatusAlerts(JSONObject json) {
         try {
             java.util.List<String> messages = new java.util.ArrayList<>();
@@ -446,8 +918,7 @@ public class BackgroundPlugin extends Plugin {
             if (reservoir >= 0 && reservoir < 20) {
                 if (!alertedReservoirLow) {
                     alertedReservoirLow = true;
-                    messages.add("Preostalo " + String.format(java.util.Locale.US, "%.0f", reservoir)
-                            + " jedinica u rezervoaru");
+                    messages.add(String.format(java.util.Locale.US, "%.0f units left in reservoir", reservoir));
                 }
             } else {
                 alertedReservoirLow = false;
@@ -460,7 +931,7 @@ public class BackgroundPlugin extends Plugin {
                     alertedSensorExpiring = true;
                     int h = sensorMinutes / 60;
                     int m = sensorMinutes % 60;
-                    messages.add("Senzor traje jos " + h + "h " + m + "m");
+                    messages.add("Sensor expires in " + h + "h " + m + "m");
                 }
             } else {
                 alertedSensorExpiring = false;
@@ -471,7 +942,7 @@ public class BackgroundPlugin extends Plugin {
             if (pumpBattery >= 0 && pumpBattery < 20) {
                 if (!alertedPumpBatteryLow) {
                     alertedPumpBatteryLow = true;
-                    messages.add("Baterija pumpice: " + pumpBattery + "%");
+                    messages.add("Pump battery: " + pumpBattery + "%");
                 }
             } else {
                 alertedPumpBatteryLow = false;
@@ -482,7 +953,7 @@ public class BackgroundPlugin extends Plugin {
             if (sensorBattery >= 0 && sensorBattery < 20) {
                 if (!alertedSensorBatteryLow) {
                     alertedSensorBatteryLow = true;
-                    messages.add("Baterija senzora: " + sensorBattery + "%");
+                    messages.add("Sensor battery: " + sensorBattery + "%");
                 }
             } else {
                 alertedSensorBatteryLow = false;
@@ -503,7 +974,10 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void showStatusAlert(String body) {
-        Context context = getContext();
+        Context context = ctx();
+        if (context == null) {
+            return;
+        }
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
 
         Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
@@ -512,7 +986,7 @@ public class BackgroundPlugin extends Plugin {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ALERT)
-                .setContentTitle("\u26a0 Upozorenje")
+                .setContentTitle("Status alert")
                 .setContentText(body)
                 .setSmallIcon(getNotificationIcon(context))
                 .setAutoCancel(true)
@@ -629,8 +1103,8 @@ public class BackgroundPlugin extends Plugin {
             return;
         }
 
-        this.accessToken = access;
-        this.refreshToken = refresh;
+        accessToken = access;
+        refreshToken = refresh;
         this.persistTokens();
         this.doLogg("setTokens: tokens updated from Ionic, fetching data immediately...");
 
@@ -650,28 +1124,25 @@ public class BackgroundPlugin extends Plugin {
 
     @PluginMethod
     public void startPolling(PluginCall call) {
-        if (scheduler != null && !scheduler.isShutdown()) {
-            call.resolve(); // already running
+        Context context = ctx();
+        if (context == null) {
+            call.reject("No context");
             return;
         }
-        this.startForegroundService();
 
-        this.doLogg("Polling started");
-        scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleWithFixedDelay(() -> {
-            try {
-                if (this.accessToken != null && this.refreshToken != null
-                        && !isAccessTokenExpiringSoon(this.accessToken, ACCESS_EXPIRY_BUFFER_SEC)) {
-                    this.doLogg("Polling: access token valid, fetching data");
-                    this.getData();
-                } else {
-                    this.doLogg("Polling: access token expiring or missing, refreshing");
-                    refreshTokenSilently();
-                }
-            } catch (Exception e) {
-                this.doLogg("Polling: error: " + e.getMessage());
-            }
-        }, 0, 2, TimeUnit.MINUTES);
+        pluginRef = new WeakReference<>(this);
+        appContext = context.getApplicationContext();
+        ensureNotificationChannels();
+
+        Intent intent = new Intent(context, ForegroundService.class);
+        intent.setAction(ForegroundService.ACTION_START);
+        try {
+            ContextCompat.startForegroundService(context, intent);
+            this.doLogg("startPolling: ForegroundService start requested");
+        } catch (Exception e) {
+            this.doLogg("startPolling: FGS start failed, falling back to in-process scheduler: " + e.getMessage());
+            startBackgroundPolling(context);
+        }
 
         JSObject result = new JSObject();
         result.put("started", true);
@@ -680,10 +1151,22 @@ public class BackgroundPlugin extends Plugin {
 
     @PluginMethod
     public void stopPolling(PluginCall call) {
-        if (scheduler != null) {
-            scheduler.shutdown();
-            scheduler = null;
+        Context context = ctx();
+        if (context != null) {
+            Intent intent = new Intent(context, ForegroundService.class);
+            intent.setAction(ForegroundService.ACTION_STOP);
+            try {
+                context.startService(intent);
+            } catch (Exception e) {
+                Log.w("BackgroundPlugin", "stopPolling startService STOP failed", e);
+            }
+            try {
+                context.stopService(new Intent(context, ForegroundService.class));
+            } catch (Exception e) {
+                Log.w("BackgroundPlugin", "stopPolling stopService failed", e);
+            }
         }
+        stopBackgroundPolling();
 
         JSObject result = new JSObject();
         result.put("stopped", true);
@@ -713,8 +1196,8 @@ public class BackgroundPlugin extends Plugin {
     @PluginMethod
     public void getTokens(PluginCall call) {
         JSObject result = new JSObject();
-        result.put("accessToken", this.accessToken != null ? this.accessToken : "");
-        result.put("refreshToken", this.refreshToken != null ? this.refreshToken : "");
+        result.put("accessToken", accessToken != null ? accessToken : "");
+        result.put("refreshToken", refreshToken != null ? refreshToken : "");
         call.resolve(result);
     }
 
@@ -722,8 +1205,8 @@ public class BackgroundPlugin extends Plugin {
     public void requestTokenRefresh(PluginCall call) {
         new Thread(() -> {
             boolean ok;
-            if (this.accessToken != null && this.refreshToken != null
-                    && !isAccessTokenExpiringSoon(this.accessToken, ACCESS_EXPIRY_BUFFER_SEC)) {
+            if (accessToken != null && refreshToken != null
+                    && !isAccessTokenExpiringSoon(accessToken, ACCESS_EXPIRY_BUFFER_SEC)) {
                 ok = true;
                 this.doLogg("requestTokenRefresh: access token still valid");
             } else {
@@ -731,15 +1214,16 @@ public class BackgroundPlugin extends Plugin {
             }
             JSObject result = new JSObject();
             result.put("success", ok);
-            result.put("accessToken", this.accessToken != null ? this.accessToken : "");
-            result.put("refreshToken", this.refreshToken != null ? this.refreshToken : "");
+            result.put("accessToken", accessToken != null ? accessToken : "");
+            result.put("refreshToken", refreshToken != null ? refreshToken : "");
             call.resolve(result);
         }).start();
     }
 
     private boolean refreshTokenSilently() {
-        if (this.refreshToken == null) {
+        if (refreshToken == null) {
             this.doLogg("No refresh token available.");
+            recordPollFailure("no refresh token");
             return false;
         }
 
@@ -754,7 +1238,7 @@ public class BackgroundPlugin extends Plugin {
 
             StringBuilder body = new StringBuilder();
             body.append("grant_type=refresh_token");
-            body.append("&refresh_token=").append(URLEncoder.encode(this.refreshToken, "UTF-8"));
+            body.append("&refresh_token=").append(URLEncoder.encode(refreshToken, "UTF-8"));
             body.append("&client_id=PeAhkbhQWlQRxJiQxWfcFBiGus1lxfe9");
             body.append("&redirect_uri=").append(URLEncoder.encode("com.medtronic.carepartner:/sso", "UTF-8"));
             body.append("&audience=").append(URLEncoder.encode(OAUTH_AUDIENCE, "UTF-8"));
@@ -781,15 +1265,15 @@ public class BackgroundPlugin extends Plugin {
                     JSONObject json = new JSONObject(response.toString());
 
                     this.doLogg("Polling: success tokens: " + json.toString());
-                    this.accessToken = json.getString("access_token");
-                    this.refreshToken = json.optString("refresh_token", this.refreshToken);
+                    accessToken = json.getString("access_token");
+                    refreshToken = json.optString("refresh_token", refreshToken);
                     this.persistTokens();
 
                     this.doLogg("Polling: token refresh OK");
                     JSObject result = new JSObject();
-                    result.put("access_token", this.accessToken);
-                    result.put("refresh_token", this.refreshToken);
-                    notifyListeners("onTokenRefreshed", result);
+                    result.put("access_token", accessToken);
+                    result.put("refresh_token", refreshToken);
+                    safeNotify("onTokenRefreshed", result);
                     this.getData(); // fetch data after refresh
                     return true;
                 } catch (Exception e) {
@@ -802,20 +1286,21 @@ public class BackgroundPlugin extends Plugin {
                         + response.toString().substring(0, Math.min(200, response.length())));
                 Log.e("BackgroundPlugin", "Refresh failed: " + response.toString());
 
-                if (this.accessToken != null && !isAccessTokenExpiringSoon(this.accessToken, 60)) {
+                if (accessToken != null && !isAccessTokenExpiringSoon(accessToken, 60)) {
                     this.doLogg("Polling: refresh failed, trying getData with existing access token...");
                     this.getData();
                     return true;
                 }
 
+                recordPollFailure("token refresh HTTP " + responseCode);
                 JSObject error = new JSObject();
                 error.put("error", "token_refresh_failed");
                 error.put("status", responseCode);
                 error.put("message", response.toString().substring(0, Math.min(200, response.length())));
-                notifyListeners("onTokenRefreshFailed", error);
+                safeNotify("onTokenRefreshFailed", error);
 
-                showNotification("Token istekao", "Otvorite aplikaciju za ponovnu prijavu", 0, false);
-                updateWidget("--", "", "Token istekao", "", 0);
+                showNotification("Session expired", "Open the app to sign in again", 0, false);
+                updateWidget("--", "", "Session expired", "", 0);
                 return false;
             }
 
@@ -828,7 +1313,10 @@ public class BackgroundPlugin extends Plugin {
 
     private void updateWidget(String glucoseValue, String trendArrow, String timeSince, String status, double sgValue) {
         try {
-            Context context = getContext();
+            Context context = ctx();
+            if (context == null) {
+                return;
+            }
             android.content.SharedPreferences prefs = context.getSharedPreferences("glucose_widget_prefs",
                     Context.MODE_PRIVATE);
             prefs.edit()
@@ -854,14 +1342,18 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void doLogg(String message) {
+        Log.i("BackgroundPlugin", message);
         JSObject result = new JSObject();
         result.put("message", message);
-        notifyListeners("onLogged", result);
+        safeNotify("onLogged", result);
     }
 
     private String getUsernameFromToken() {
         try {
-            String[] parts = this.accessToken.split("\\.");
+            if (accessToken == null || accessToken.isEmpty()) {
+                return "";
+            }
+            String[] parts = accessToken.split("\\.");
             if (parts.length < 2)
                 return "";
             String payload = parts[1];
@@ -887,7 +1379,7 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void getData() {
-        if (this.accessToken == null) {
+        if (accessToken == null) {
             Log.e("BackgroundPlugin", "No access token set. Skipping getData().");
             return;
         }
@@ -899,7 +1391,7 @@ public class BackgroundPlugin extends Plugin {
                 URL url = new URL("https://clcloud.minimed.eu/connect/carepartner/v13/display/message");
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("POST");
-                conn.setRequestProperty("Authorization", "Bearer " + this.accessToken);
+                conn.setRequestProperty("Authorization", "Bearer " + accessToken);
                 conn.setRequestProperty("Accept",
                         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9");
                 conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
@@ -909,7 +1401,6 @@ public class BackgroundPlugin extends Plugin {
                 conn.setDoOutput(true);
 
                 String tokenUsername = getUsernameFromToken();
-                String patientUsername = "jejka3006"; // TODO: pass from Ionic
                 JSONObject payload = new JSONObject();
                 payload.put("username", tokenUsername.isEmpty() ? patientUsername : tokenUsername);
                 payload.put("role", "carepartner");
@@ -925,17 +1416,23 @@ public class BackgroundPlugin extends Plugin {
 
                 if (responseCode == 401) {
                     this.doLogg("getData: 401 unauthorized — session expired");
-                    updateWidget("--", "", "Potrebna prijava", "", 0);
+                    recordPollFailure("401 unauthorized");
+                    updateWidget("--", "", "Sign in required", "", 0);
                     JSObject authError = new JSObject();
                     authError.put("error", "unauthorized");
                     authError.put("status", 401);
-                    notifyListeners("onDataFetchError", authError);
+                    safeNotify("onDataFetchError", authError);
                     return;
                 }
 
                 if (responseCode != 200) {
                     this.doLogg("getData: unexpected status " + responseCode);
-                    updateWidget("--", "", "Greska podataka", "", 0);
+                    recordPollFailure("HTTP " + responseCode);
+                    updateWidget("--", "", "Data error", "", 0);
+                    JSObject err = new JSObject();
+                    err.put("error", "http_error");
+                    err.put("status", responseCode);
+                    safeNotify("onDataFetchError", err);
                     return;
                 }
 
@@ -954,7 +1451,7 @@ public class BackgroundPlugin extends Plugin {
                 // Send to Ionic
                 JSObject result = new JSObject();
                 result.put("data", responseBody); // or parse to JSON first if needed
-                notifyListeners("onDataFetched", result);
+                safeNotify("onDataFetched", result);
 
                 JSONObject jsonData = new JSONObject(responseBody);// from getData()
                 JSONObject nestedPatientData = (JSONObject) jsonData.get("patientData");
@@ -970,8 +1467,10 @@ public class BackgroundPlugin extends Plugin {
                     }
                 }
 
-                notifyListeners("onLogged", this.convertJSONObjectToJSObject(nestedPatientData));
+                safeNotify("onLogged", this.convertJSONObjectToJSObject(nestedPatientData));
                 JSONObject last = getLastGlicemia(nestedPatientData);
+                long readingTs = last.optLong("timestamp", 0);
+                recordPollSuccess(readingTs);
                 String timeSince = this.getTimeSinceLastGS(nestedPatientData);
 
                 double sg = 0;
@@ -982,19 +1481,21 @@ public class BackgroundPlugin extends Plugin {
                 }
 
                 boolean sensorConnected = nestedPatientData.optBoolean("conduitSensorInRange", false);
-                boolean playSound = (sg < 3.9 || sg > 10.0);
+                boolean playSound = (sg > 0 && (sg < alarmLow || sg > alarmHigh));
 
                 if (!sensorConnected) {
-                    showNotification("Senzor nije povezan", "", 0, false);
-                    updateWidget("--", "", "Senzor nije povezan", "", 0);
+                    showNotification("Sensor disconnected", "", 0, false);
+                    updateWidget("--", "", "Sensor disconnected", "", 0);
                 } else {
                     String trendArrow = getTrendArrow(nestedPatientData);
                     String title = last.optString("sg", "0") + " mmol/L" + trendArrow + "  \u00b7  " + timeSince.trim();
                     String statusText = "";
-                    if (sg < 3.9)
-                        statusText = "\u2757 Niska glikemija!";
-                    else if (sg > 10.0)
-                        statusText = "\u26a1 Visoka glikemija!";
+                    if (sg > 0 && sg < alarmUrgentLow)
+                        statusText = "Urgent low";
+                    else if (sg > 0 && sg < alarmLow)
+                        statusText = "Low glucose";
+                    else if (sg > alarmHigh)
+                        statusText = "High glucose";
                     StringBuilder body = new StringBuilder();
                     if (!statusText.isEmpty()) {
                         body.append(statusText);
@@ -1006,7 +1507,7 @@ public class BackgroundPlugin extends Plugin {
                                 "activeInsulin from getData: " + (ai != null ? ai.toString() : "null"));
                         if (ai != null) {
                             double amount = ai.optDouble("amount", 0);
-                            details.append("Aktivni insulin: ")
+                            details.append("Active insulin: ")
                                     .append(String.format(java.util.Locale.US, "%.1f", amount)).append(" U");
                         }
                     } catch (Exception ignored) {
@@ -1015,14 +1516,14 @@ public class BackgroundPlugin extends Plugin {
                     if (reservoir >= 0) {
                         if (details.length() > 0)
                             details.append("\n");
-                        details.append("Rezervoar: ")
+                        details.append("Reservoir: ")
                                 .append(String.format(java.util.Locale.US, "%.0f", reservoir)).append(" U");
                     }
                     boolean isTempBasal = nestedPatientData.optBoolean("isTempBasal", false);
                     if (isTempBasal) {
                         if (details.length() > 0)
                             details.append("\n");
-                        details.append("Temporalni bazal: aktivan");
+                        details.append("Temp basal: active");
                     }
                     if (details.length() > 0) {
                         if (body.length() > 0)
@@ -1035,11 +1536,12 @@ public class BackgroundPlugin extends Plugin {
 
             } catch (Exception e) {
                 Log.e("BackgroundPlugin", "Error in getData()", e);
+                recordPollFailure(e.getMessage() != null ? e.getMessage() : "exception");
 
                 JSObject error = new JSObject();
                 error.put("error", "getData failed");
                 error.put("message", e.getMessage());
-                notifyListeners("onDataFetchError", error);
+                safeNotify("onDataFetchError", error);
             }
         }).start();
     }

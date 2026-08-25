@@ -589,11 +589,53 @@ public class BackgroundPlugin extends Plugin {
                     return " \u2198";
                 case "DOWN_DOUBLE":
                     return " \u2193\u2193";
+                case "NONE":
+                case "":
+                    return deriveTrendArrowFromSgs(json);
                 default:
                     return " \u2192";
             }
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    /** When CareLink sends NONE, slope over ~15 min of accepted SGs. */
+    private String deriveTrendArrowFromSgs(JSONObject json) {
+        try {
+            long cutoff = System.currentTimeMillis() + 2L * 60L * 1000L;
+            long server = json.optLong("currentServerTime", 0);
+            if (server > 0) cutoff = server + 2L * 60L * 1000L;
+
+            JSONArray sgs = json.optJSONArray("sgs");
+            if (sgs == null || sgs.length() < 2) return " \u2192";
+
+            java.util.ArrayList<long[]> pts = new java.util.ArrayList<>();
+            for (int i = 0; i < sgs.length(); i++) {
+                JSONObject sg = sgs.optJSONObject(i);
+                if (sg == null || sg.optInt("sg", 0) <= 0) continue;
+                long ts = readingTsMillis(sg);
+                if (ts <= 0 || ts > cutoff) continue;
+                pts.add(new long[]{ ts, sg.optInt("sg", 0) });
+            }
+            if (pts.size() < 2) return " \u2192";
+            pts.sort((a, b) -> Long.compare(a[0], b[0]));
+            long[] end = pts.get(pts.size() - 1);
+            long windowStart = end[0] - 15L * 60L * 1000L;
+            long[] start = pts.get(0);
+            for (long[] p : pts) {
+                if (p[0] >= windowStart) {
+                    start = p;
+                    break;
+                }
+            }
+            double dtMin = (end[0] - start[0]) / 60000.0;
+            if (dtMin <= 0) return " \u2192";
+            double slopeMmol = ((end[1] - start[1]) / 18.0182) / dtMin;
+            if (Math.abs(slopeMmol) < 0.05) return " \u2192";
+            return slopeMmol > 0 ? " \u2197" : " \u2198";
+        } catch (Exception e) {
+            return " \u2192";
         }
     }
 
@@ -606,9 +648,12 @@ public class BackgroundPlugin extends Plugin {
             if (json != null && json.has("sgs")) {
                 JSONArray originalSgs = json.optJSONArray("sgs");
                 if (originalSgs != null) {
-                    JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs);
+                    long sparkCutoff = System.currentTimeMillis() + 2L * 60L * 1000L;
+                    long server = json.optLong("currentServerTime", 0);
+                    if (server > 0) sparkCutoff = server + 2L * 60L * 1000L;
+                    JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs, sparkCutoff);
                     json.put("sgs", cleanedSortedSgs);
-                    saveSparklineFromSgs(cleanedSortedSgs);
+                    saveSparklineFromSgs(cleanedSortedSgs, sparkCutoff);
                 }
             }
 
@@ -1455,25 +1500,23 @@ public class BackgroundPlugin extends Plugin {
 
     /** Store last-3h mmol points for the chart widget sparkline (oldest → newest). */
     private void saveSparklineFromSgs(JSONArray sgs) {
+        saveSparklineFromSgs(sgs, System.currentTimeMillis() + 2L * 60L * 1000L);
+    }
+
+    private void saveSparklineFromSgs(JSONArray sgs, long serverCutoff) {
         try {
             Context context = ctx();
             if (context == null || sgs == null) return;
             long cutoff = System.currentTimeMillis() - 3L * 60L * 60L * 1000L;
-            // cleanAndSortSgs is newest-first; walk reverse for chronological sparkline
             java.util.ArrayList<String> pts = new java.util.ArrayList<>();
             for (int i = sgs.length() - 1; i >= 0; i--) {
                 JSONObject sg = sgs.optJSONObject(i);
                 if (sg == null) continue;
                 int mg = sg.optInt("sg", 0);
                 if (mg <= 0) continue;
-                long ts = 0;
-                Object raw = sg.opt("timestamp");
-                if (raw instanceof Number) {
-                    ts = ((Number) raw).longValue();
-                } else if (raw instanceof String) {
-                    ts = parseIso8601ToMillis((String) raw);
-                }
+                long ts = readingTsMillis(sg);
                 if (ts > 0 && ts < cutoff) continue;
+                if (ts > serverCutoff) continue;
                 double mmol = mg / 18.0182;
                 pts.add(String.format(Locale.US, "%.1f", mmol));
             }
@@ -1671,11 +1714,13 @@ public class BackgroundPlugin extends Plugin {
                     JSONArray originalSgs = nestedPatientData.optJSONArray("sgs");
 
                     if (originalSgs != null) {
-                        JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs);
+                        long sparkCutoff = System.currentTimeMillis() + 2L * 60L * 1000L;
+                        long server = nestedPatientData.optLong("currentServerTime", 0);
+                        if (server > 0) sparkCutoff = server + 2L * 60L * 1000L;
+                        JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs, sparkCutoff);
 
-                        // Update nestedPatientData.sgs
                         nestedPatientData.put("sgs", cleanedSortedSgs);
-                        saveSparklineFromSgs(cleanedSortedSgs);
+                        saveSparklineFromSgs(cleanedSortedSgs, sparkCutoff);
                     }
                 }
 
@@ -1751,33 +1796,33 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private JSONArray cleanAndSortSgs(JSONArray sgsArray) {
+        return cleanAndSortSgs(sgsArray, System.currentTimeMillis() + 2L * 60L * 1000L);
+    }
+
+    private JSONArray cleanAndSortSgs(JSONArray sgsArray, long serverCutoff) {
         try {
             List<JSONObject> sgList = new ArrayList<>();
 
-            // Step 1: Reverse and filter (sg > 0 && has timestamp)
             for (int i = sgsArray.length() - 1; i >= 0; i--) {
                 JSONObject sg = sgsArray.optJSONObject(i);
-                if (sg != null && sg.has("sg") && sg.optInt("sg", 0) > 0 && sg.has("timestamp")) {
-                    sgList.add(sg);
+                if (sg == null || !sg.has("sg") || sg.optInt("sg", 0) <= 0 || !sg.has("timestamp")) {
+                    continue;
                 }
+                long ts = readingTsMillis(sg);
+                if (ts <= 0 || ts > serverCutoff) continue;
+                sgList.add(sg);
             }
 
-            // Step 2: Sort descending by ISO timestamp
             sgList.sort((a, b) -> {
                 try {
-                    String tsA = a.optString("timestamp");
-                    String tsB = b.optString("timestamp");
-
-                    long timeA = parseIso8601ToMillis(tsA);
-                    long timeB = parseIso8601ToMillis(tsB);
-
-                    return Long.compare(timeB, timeA); // descending
+                    long timeA = readingTsMillis(a);
+                    long timeB = readingTsMillis(b);
+                    return Long.compare(timeB, timeA);
                 } catch (Exception e) {
                     return 0;
                 }
             });
 
-            // Step 3: Return as JSONArray
             JSONArray result = new JSONArray();
             for (JSONObject sg : sgList) {
                 result.put(sg);
@@ -1786,7 +1831,7 @@ public class BackgroundPlugin extends Plugin {
 
         } catch (Exception e) {
             e.printStackTrace();
-            return new JSONArray(); // fallback
+            return new JSONArray();
         }
     }
 
@@ -1822,56 +1867,55 @@ public class BackgroundPlugin extends Plugin {
 
     private JSONObject getLastGlicemia(JSONObject data) {
         try {
-            JSONObject sgObject = null;
+            long cutoff = System.currentTimeMillis() + 2L * 60L * 1000L;
+            if (data != null && data.has("currentServerTime")) {
+                long server = data.optLong("currentServerTime", 0);
+                if (server > 0) {
+                    cutoff = server + 2L * 60L * 1000L;
+                }
+            }
 
-            if (data.has("lastSG")) {
+            JSONObject best = null;
+            long bestTs = -1;
+
+            if (data != null && data.has("lastSG")) {
                 JSONObject lastSG = data.optJSONObject("lastSG");
-
-                if (lastSG != null && lastSG.has("sg") && lastSG.optInt("sg", 0) > 0) {
-                    sgObject = lastSG;
+                if (lastSG != null && lastSG.optInt("sg", 0) > 0 && lastSG.has("timestamp")) {
+                    long ts = readingTsMillis(lastSG);
+                    if (ts > 0 && ts <= cutoff) {
+                        best = lastSG;
+                        bestTs = ts;
+                    }
                 }
             }
 
-            if (sgObject == null && data.has("sgs")) {
+            if (data != null && data.has("sgs")) {
                 JSONArray sgs = data.optJSONArray("sgs");
-                this.doLogg("Polling: get sgs");
-                this.doLogg(sgs.toString());
-                if (sgs != null && sgs.length() > 0) {
-                    JSONObject firstSG = sgs.optJSONObject(0);
-                    if (firstSG != null) {
-                        sgObject = firstSG;
+                if (sgs != null) {
+                    for (int i = 0; i < sgs.length(); i++) {
+                        JSONObject sg = sgs.optJSONObject(i);
+                        if (sg == null || sg.optInt("sg", 0) <= 0 || !sg.has("timestamp")) {
+                            continue;
+                        }
+                        long ts = readingTsMillis(sg);
+                        if (ts <= 0 || ts > cutoff) continue;
+                        if (ts >= bestTs) {
+                            best = sg;
+                            bestTs = ts;
+                        }
                     }
                 }
             }
 
-            if (sgObject != null && sgObject.has("sg")) {
-                int sgMg = sgObject.optInt("sg", 0);
+            if (best != null) {
+                int sgMg = best.optInt("sg", 0);
                 double sgMmol = sgMg / 18.0182;
-
-                // extract raw timestamp
-                long rawTimestamp = 0;
-                if (sgObject.has("timestamp")) {
-                    Object ts = sgObject.get("timestamp");
-                    if (ts instanceof Number) {
-                        rawTimestamp = ((Number) ts).longValue();
-                    } else if (ts instanceof String) {
-                        // Try to parse ISO if it's a string
-                        rawTimestamp = parseIso8601ToMillis((String) ts);
-                    }
-                }
-
-                if (rawTimestamp == 0) {
-                    // Do not invent "now" — callers treat 0 as invalid / no fresh reading
-                    rawTimestamp = 0;
-                }
-
                 JSONObject result = new JSONObject();
                 result.put("sg", String.format(Locale.US, "%.1f", sgMmol));
-                result.put("timestamp", rawTimestamp);
+                result.put("timestamp", bestTs);
                 return result;
             }
 
-            // Fallback
             JSONObject fallback = new JSONObject();
             fallback.put("sg", "0.0");
             fallback.put("timestamp", 0);
@@ -1887,6 +1931,20 @@ public class BackgroundPlugin extends Plugin {
             }
             return fallback;
         }
+    }
+
+    private long readingTsMillis(JSONObject sg) {
+        try {
+            Object ts = sg.get("timestamp");
+            if (ts instanceof Number) {
+                return ((Number) ts).longValue();
+            }
+            if (ts instanceof String) {
+                return parseIso8601ToMillis((String) ts);
+            }
+        } catch (Exception ignored) {
+        }
+        return 0;
     }
 
     private String getTimeSinceLastGS(JSONObject data) {

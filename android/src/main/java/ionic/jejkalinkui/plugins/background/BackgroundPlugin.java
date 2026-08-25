@@ -610,6 +610,7 @@ public class BackgroundPlugin extends Plugin {
                 if (originalSgs != null) {
                     JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs);
                     json.put("sgs", cleanedSortedSgs);
+                    saveSparklineFromSgs(cleanedSortedSgs);
                 }
             }
 
@@ -1335,12 +1336,71 @@ public class BackgroundPlugin extends Plugin {
                 ed.putLong("last_good_reading_ms", readingTsMs);
             }
             ed.apply();
-
-            Intent intent = new Intent("ionic.jejkalinkui.UPDATE_GLUCOSE_WIDGET");
-            intent.setComponent(new android.content.ComponentName(context, "ionic.jejkalinkui.GlucoseWidgetProvider"));
-            context.sendBroadcast(intent);
+            notifyAllGlucoseWidgets(context);
         } catch (Exception e) {
             Log.e("BackgroundPlugin", "Widget update failed", e);
+        }
+    }
+
+    private void notifyAllGlucoseWidgets(Context context) {
+        String[] providers = {
+                "ionic.jejkalinkui.GlucoseWidgetProvider",
+                "ionic.jejkalinkui.GlucoseWidgetCompactProvider",
+                "ionic.jejkalinkui.GlucoseWidgetChartProvider",
+        };
+        for (String name : providers) {
+            try {
+                Intent intent = new Intent("ionic.jejkalinkui.UPDATE_GLUCOSE_WIDGET");
+                intent.setComponent(new android.content.ComponentName(context, name));
+                context.sendBroadcast(intent);
+            } catch (Exception e) {
+                Log.e("BackgroundPlugin", "Widget notify failed for " + name, e);
+            }
+        }
+    }
+
+    /** Store last-3h mmol points for the chart widget sparkline (oldest → newest). */
+    private void saveSparklineFromSgs(JSONArray sgs) {
+        try {
+            Context context = ctx();
+            if (context == null || sgs == null) return;
+            long cutoff = System.currentTimeMillis() - 3L * 60L * 60L * 1000L;
+            // cleanAndSortSgs is newest-first; walk reverse for chronological sparkline
+            java.util.ArrayList<String> pts = new java.util.ArrayList<>();
+            for (int i = sgs.length() - 1; i >= 0; i--) {
+                JSONObject sg = sgs.optJSONObject(i);
+                if (sg == null) continue;
+                int mg = sg.optInt("sg", 0);
+                if (mg <= 0) continue;
+                long ts = 0;
+                Object raw = sg.opt("timestamp");
+                if (raw instanceof Number) {
+                    ts = ((Number) raw).longValue();
+                } else if (raw instanceof String) {
+                    ts = parseIso8601ToMillis((String) raw);
+                }
+                if (ts > 0 && ts < cutoff) continue;
+                double mmol = mg / 18.0182;
+                pts.add(String.format(Locale.US, "%.1f", mmol));
+            }
+            // Cap density for the tiny bitmap
+            while (pts.size() > 48) {
+                java.util.ArrayList<String> down = new java.util.ArrayList<>();
+                for (int i = 0; i < pts.size(); i += 2) {
+                    down.add(pts.get(i));
+                }
+                if (pts.size() % 2 == 1) {
+                    down.add(pts.get(pts.size() - 1));
+                }
+                pts = down;
+            }
+            String csv = android.text.TextUtils.join(",", pts);
+            context.getSharedPreferences("glucose_widget_prefs", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("sparkline_points", csv)
+                    .apply();
+        } catch (Exception e) {
+            Log.e("BackgroundPlugin", "saveSparklineFromSgs failed", e);
         }
     }
 
@@ -1523,6 +1583,7 @@ public class BackgroundPlugin extends Plugin {
 
                         // Update nestedPatientData.sgs
                         nestedPatientData.put("sgs", cleanedSortedSgs);
+                        saveSparklineFromSgs(cleanedSortedSgs);
                     }
                 }
 

@@ -646,6 +646,17 @@ public class BackgroundPlugin extends Plugin {
             JSObject data = call.getData();
             JSONObject json = new JSONObject(data.toString());
 
+            if (isUnreliablePumpClock(json)) {
+                this.doLogg("showNotificationFromIonic: skipped NGP snapshot, pumpCommunicationState=false");
+                recordPollSuccess(0);
+                showStaleOrDisconnected("Pump disconnected");
+                JSObject skipped = new JSObject();
+                skipped.put("success", true);
+                skipped.put("skipped", "pump-disconnected");
+                call.resolve(skipped);
+                return;
+            }
+
             if (json != null && json.has("sgs")) {
                 JSONArray originalSgs = json.optJSONArray("sgs");
                 if (originalSgs != null) {
@@ -1715,6 +1726,13 @@ public class BackgroundPlugin extends Plugin {
                 JSONObject jsonData = new JSONObject(responseBody);// from getData()
                 JSONObject nestedPatientData = (JSONObject) jsonData.get("patientData");
 
+                if (isUnreliablePumpClock(nestedPatientData)) {
+                    this.doLogg("getData: skipped NGP snapshot, pumpCommunicationState=false");
+                    recordPollSuccess(0);
+                    showStaleOrDisconnected("Pump disconnected");
+                    return;
+                }
+
                 if (nestedPatientData != null && nestedPatientData.has("sgs")) {
                     JSONArray originalSgs = nestedPatientData.optJSONArray("sgs");
 
@@ -1959,6 +1977,15 @@ public class BackgroundPlugin extends Plugin {
 
     private int deviceUtcOffsetMin() {
         return TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000;
+    }
+
+    /** MiniMed 7xxG clock is wrong while the pump is unreachable — skip the snapshot. */
+    private boolean isUnreliablePumpClock(JSONObject patientData) {
+        if (patientData == null) return false;
+        String fam = patientData.optString("medicalDeviceFamily", "").toUpperCase(Locale.US);
+        if (!fam.equals("NGP") && !fam.equals("CC")) return false;
+        return patientData.has("pumpCommunicationState")
+                && !patientData.optBoolean("pumpCommunicationState", true);
     }
 
     private int inferCarelinkOffsetMin(JSONObject data) {

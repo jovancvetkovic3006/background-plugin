@@ -573,6 +573,63 @@ public class BackgroundPlugin extends Plugin {
         return bitmap;
     }
 
+    /** Full-bleed colored banner for BigPictureStyle (safer than custom RemoteViews). */
+    private Bitmap createLiveActivityBanner(String value, String trend, String age, String status,
+            String details, int accentColor) {
+        int w = 960;
+        int h = details != null && !details.isEmpty() ? 320 : 240;
+        Bitmap bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        canvas.drawColor(accentColor);
+
+        Paint valuePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        valuePaint.setColor(Color.WHITE);
+        valuePaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+        valuePaint.setTextSize(96f);
+        canvas.drawText(value != null ? value : "--", 48f, 110f, valuePaint);
+
+        Paint trendPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        trendPaint.setColor(Color.WHITE);
+        trendPaint.setTextSize(64f);
+        float valueWidth = valuePaint.measureText(value != null ? value : "--");
+        if (trend != null && !trend.isEmpty()) {
+            canvas.drawText(trend, 48f + valueWidth + 16f, 100f, trendPaint);
+        }
+
+        Paint metaPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        metaPaint.setColor(Color.WHITE);
+        metaPaint.setTextSize(36f);
+        metaPaint.setAlpha(230);
+        String ageText = age != null ? age : "";
+        float ageW = metaPaint.measureText(ageText);
+        canvas.drawText(ageText, w - 48f - ageW, 90f, metaPaint);
+
+        Paint unitPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        unitPaint.setColor(Color.WHITE);
+        unitPaint.setTextSize(32f);
+        unitPaint.setAlpha(200);
+        canvas.drawText("mmol/L", 48f, 160f, unitPaint);
+
+        if (status != null && !status.isEmpty()) {
+            Paint statusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            statusPaint.setColor(Color.WHITE);
+            statusPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            statusPaint.setTextSize(40f);
+            canvas.drawText(status, 48f, 215f, statusPaint);
+        }
+
+        if (details != null && !details.isEmpty()) {
+            Paint detPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            detPaint.setColor(Color.WHITE);
+            detPaint.setTextSize(32f);
+            detPaint.setAlpha(220);
+            String oneLine = details.replace("\n", " · ");
+            canvas.drawText(oneLine, 48f, 280f, detPaint);
+        }
+
+        return bitmap;
+    }
+
     private String getTrendArrow(JSONObject json) {
         try {
             String trend = json.optString("lastSGTrend", "");
@@ -751,25 +808,26 @@ public class BackgroundPlugin extends Plugin {
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setColor(accentColor)
+                    .setLargeIcon(createGlucoseIcon(sgValue))
                     .addAction(android.R.drawable.ic_popup_sync, "Refresh", refreshPending);
 
-            RemoteViews compact = buildGlucoseRemoteViews(context, "notification_glucose", valueText, trendText,
-                    ageText, statusText, detailsText, accentColor, false);
-            RemoteViews expanded = buildGlucoseRemoteViews(context, "notification_glucose_expanded", valueText,
-                    trendText, ageText, statusText, detailsText, accentColor, true);
-
-            if (compact != null) {
-                builder.setCustomContentView(compact);
-                builder.setCustomHeadsUpContentView(compact);
-            }
-            if (expanded != null) {
-                builder.setCustomBigContentView(expanded);
-            }
-            if (compact == null && fallbackBody != null && !fallbackBody.isEmpty()) {
-                builder.setStyle(new NotificationCompat.BigTextStyle()
-                        .bigText(fallbackBody)
-                        .setBigContentTitle(fallbackTitle));
-                builder.setLargeIcon(createGlucoseIcon(sgValue));
+            // Prefer a drawn banner over custom RemoteViews — OEM SystemUI often
+            // crashes the app process when inflating complex custom notification layouts.
+            try {
+                Bitmap banner = createLiveActivityBanner(valueText, trendText, ageText, statusText,
+                        detailsText, accentColor);
+                builder.setStyle(new NotificationCompat.BigPictureStyle()
+                        .bigPicture(banner)
+                        .bigLargeIcon((Bitmap) null)
+                        .setBigContentTitle(fallbackTitle)
+                        .setSummaryText(statusText.isEmpty() ? "JejkaLink" : statusText));
+            } catch (Throwable t) {
+                this.doLogg("Banner style failed, BigText fallback: " + t.getMessage());
+                if (fallbackBody != null && !fallbackBody.isEmpty()) {
+                    builder.setStyle(new NotificationCompat.BigTextStyle()
+                            .bigText(fallbackBody)
+                            .setBigContentTitle(fallbackTitle));
+                }
             }
 
             notificationManager.notify(NOTIFICATION_ID, builder.build());

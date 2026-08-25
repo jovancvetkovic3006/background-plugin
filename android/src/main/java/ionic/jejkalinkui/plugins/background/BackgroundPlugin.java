@@ -610,11 +610,12 @@ public class BackgroundPlugin extends Plugin {
             JSONArray sgs = json.optJSONArray("sgs");
             if (sgs == null || sgs.length() < 2) return " \u2192";
 
+            int offsetMin = inferCarelinkOffsetMin(json);
             java.util.ArrayList<long[]> pts = new java.util.ArrayList<>();
             for (int i = 0; i < sgs.length(); i++) {
                 JSONObject sg = sgs.optJSONObject(i);
                 if (sg == null || sg.optInt("sg", 0) <= 0) continue;
-                long ts = readingTsMillis(sg);
+                long ts = readingTsMillis(sg, offsetMin);
                 if (ts <= 0 || ts > cutoff) continue;
                 pts.add(new long[]{ ts, sg.optInt("sg", 0) });
             }
@@ -651,9 +652,10 @@ public class BackgroundPlugin extends Plugin {
                     long sparkCutoff = System.currentTimeMillis() + 2L * 60L * 1000L;
                     long server = json.optLong("currentServerTime", 0);
                     if (server > 0) sparkCutoff = server + 2L * 60L * 1000L;
-                    JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs, sparkCutoff);
+                    int offsetMin = inferCarelinkOffsetMin(json);
+                    JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs, sparkCutoff, offsetMin);
                     json.put("sgs", cleanedSortedSgs);
-                    saveSparklineFromSgs(cleanedSortedSgs, sparkCutoff);
+                    saveSparklineFromSgs(cleanedSortedSgs, sparkCutoff, offsetMin);
                 }
             }
 
@@ -1500,10 +1502,13 @@ public class BackgroundPlugin extends Plugin {
 
     /** Store last-3h mmol points for the chart widget sparkline (oldest → newest). */
     private void saveSparklineFromSgs(JSONArray sgs) {
-        saveSparklineFromSgs(sgs, System.currentTimeMillis() + 2L * 60L * 1000L);
+        saveSparklineFromSgs(
+                sgs,
+                System.currentTimeMillis() + 2L * 60L * 1000L,
+                TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000);
     }
 
-    private void saveSparklineFromSgs(JSONArray sgs, long serverCutoff) {
+    private void saveSparklineFromSgs(JSONArray sgs, long serverCutoff, int offsetMin) {
         try {
             Context context = ctx();
             if (context == null || sgs == null) return;
@@ -1514,7 +1519,7 @@ public class BackgroundPlugin extends Plugin {
                 if (sg == null) continue;
                 int mg = sg.optInt("sg", 0);
                 if (mg <= 0) continue;
-                long ts = readingTsMillis(sg);
+                long ts = readingTsMillis(sg, offsetMin);
                 if (ts > 0 && ts < cutoff) continue;
                 if (ts > serverCutoff) continue;
                 double mmol = mg / 18.0182;
@@ -1717,10 +1722,11 @@ public class BackgroundPlugin extends Plugin {
                         long sparkCutoff = System.currentTimeMillis() + 2L * 60L * 1000L;
                         long server = nestedPatientData.optLong("currentServerTime", 0);
                         if (server > 0) sparkCutoff = server + 2L * 60L * 1000L;
-                        JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs, sparkCutoff);
+                        int offsetMin = inferCarelinkOffsetMin(nestedPatientData);
+                        JSONArray cleanedSortedSgs = cleanAndSortSgs(originalSgs, sparkCutoff, offsetMin);
 
                         nestedPatientData.put("sgs", cleanedSortedSgs);
-                        saveSparklineFromSgs(cleanedSortedSgs, sparkCutoff);
+                        saveSparklineFromSgs(cleanedSortedSgs, sparkCutoff, offsetMin);
                     }
                 }
 
@@ -1796,10 +1802,13 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private JSONArray cleanAndSortSgs(JSONArray sgsArray) {
-        return cleanAndSortSgs(sgsArray, System.currentTimeMillis() + 2L * 60L * 1000L);
+        return cleanAndSortSgs(
+                sgsArray,
+                System.currentTimeMillis() + 2L * 60L * 1000L,
+                TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000);
     }
 
-    private JSONArray cleanAndSortSgs(JSONArray sgsArray, long serverCutoff) {
+    private JSONArray cleanAndSortSgs(JSONArray sgsArray, long serverCutoff, int offsetMin) {
         try {
             List<JSONObject> sgList = new ArrayList<>();
 
@@ -1808,15 +1817,15 @@ public class BackgroundPlugin extends Plugin {
                 if (sg == null || !sg.has("sg") || sg.optInt("sg", 0) <= 0 || !sg.has("timestamp")) {
                     continue;
                 }
-                long ts = readingTsMillis(sg);
+                long ts = readingTsMillis(sg, offsetMin);
                 if (ts <= 0 || ts > serverCutoff) continue;
                 sgList.add(sg);
             }
 
             sgList.sort((a, b) -> {
                 try {
-                    long timeA = readingTsMillis(a);
-                    long timeB = readingTsMillis(b);
+                    long timeA = readingTsMillis(a, offsetMin);
+                    long timeB = readingTsMillis(b, offsetMin);
                     return Long.compare(timeB, timeA);
                 } catch (Exception e) {
                     return 0;
@@ -1874,6 +1883,7 @@ public class BackgroundPlugin extends Plugin {
                     cutoff = server + 2L * 60L * 1000L;
                 }
             }
+            int offsetMin = inferCarelinkOffsetMin(data);
 
             JSONObject best = null;
             long bestTs = -1;
@@ -1881,7 +1891,7 @@ public class BackgroundPlugin extends Plugin {
             if (data != null && data.has("lastSG")) {
                 JSONObject lastSG = data.optJSONObject("lastSG");
                 if (lastSG != null && lastSG.optInt("sg", 0) > 0 && lastSG.has("timestamp")) {
-                    long ts = readingTsMillis(lastSG);
+                    long ts = readingTsMillis(lastSG, offsetMin);
                     if (ts > 0 && ts <= cutoff) {
                         best = lastSG;
                         bestTs = ts;
@@ -1897,7 +1907,7 @@ public class BackgroundPlugin extends Plugin {
                         if (sg == null || sg.optInt("sg", 0) <= 0 || !sg.has("timestamp")) {
                             continue;
                         }
-                        long ts = readingTsMillis(sg);
+                        long ts = readingTsMillis(sg, offsetMin);
                         if (ts <= 0 || ts > cutoff) continue;
                         if (ts >= bestTs) {
                             best = sg;
@@ -1933,16 +1943,79 @@ public class BackgroundPlugin extends Plugin {
         }
     }
 
-    private long readingTsMillis(JSONObject sg) {
+    private long readingTsMillis(JSONObject sg, int offsetMin) {
         try {
             Object ts = sg.get("timestamp");
             if (ts instanceof Number) {
                 return ((Number) ts).longValue();
             }
             if (ts instanceof String) {
-                return parseIso8601ToMillis((String) ts);
+                return parseIso8601ToMillis((String) ts, offsetMin);
             }
         } catch (Exception ignored) {
+        }
+        return 0;
+    }
+
+    private int deviceUtcOffsetMin() {
+        return TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000;
+    }
+
+    private int inferCarelinkOffsetMin(JSONObject data) {
+        int device = deviceUtcOffsetMin();
+        if (data == null) return device;
+        long server = firstPositiveMs(data,
+                "lastConduitUpdateServerDateTime",
+                "lastConduitUpdateServerTime",
+                "lastMedicalDeviceDataUpdateServerTime",
+                "currentServerTime");
+        String clock = firstClockString(data,
+                "lastConduitDateTime",
+                "sMedicalDeviceTime",
+                "medicalDeviceTimeAsString");
+        if (clock != null && server > 0) {
+            long wallUtc = parseWallAsUtc(stripCarelinkTz(clock));
+            if (wallUtc > 0) {
+                long rounded = Math.round((wallUtc - server) / 60000.0 / 15.0) * 15;
+                if (Math.abs(rounded) <= 14L * 60L) {
+                    return (int) rounded;
+                }
+            }
+        }
+        return device;
+    }
+
+    private long firstPositiveMs(JSONObject data, String... keys) {
+        for (String key : keys) {
+            long v = data.optLong(key, 0);
+            if (v > 100_000_000_000L) return v;
+        }
+        return 0;
+    }
+
+    private String firstClockString(JSONObject data, String... keys) {
+        for (String key : keys) {
+            String v = data.optString(key, "");
+            if (v != null && v.indexOf('T') >= 0) return v;
+        }
+        return null;
+    }
+
+    private String stripCarelinkTz(String iso) {
+        return iso.replaceAll("([Zz]|[+-]\\d{2}:\\d{2})$", "");
+    }
+
+    private long parseWallAsUtc(String wall) {
+        String[] patterns = {"yyyy-MM-dd'T'HH:mm:ss.SSS", "yyyy-MM-dd'T'HH:mm:ss"};
+        for (String pattern : patterns) {
+            try {
+                SimpleDateFormat sdf = new SimpleDateFormat(pattern, Locale.US);
+                sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+                sdf.setLenient(false);
+                Date parsed = sdf.parse(wall);
+                if (parsed != null) return parsed.getTime();
+            } catch (Exception ignored) {
+            }
         }
         return 0;
     }
@@ -1977,10 +2050,15 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private long parseIso8601ToMillis(String isoTime) {
+        return parseIso8601ToMillis(isoTime, deviceUtcOffsetMin());
+    }
+
+    /** Wall-clock digits in the CareLink/conduit offset, not the phone TZ. */
+    private long parseIso8601ToMillis(String isoTime, int offsetMin) {
         try {
-            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
-            sdf.setTimeZone(TimeZone.getDefault()); // ✅ LOCAL time, since your input has no TZ
-            return sdf.parse(isoTime).getTime();
+            long wallUtc = parseWallAsUtc(stripCarelinkTz(isoTime));
+            if (wallUtc <= 0) return 0;
+            return wallUtc - offsetMin * 60L * 1000L;
         } catch (Exception e) {
             e.printStackTrace();
             return 0;

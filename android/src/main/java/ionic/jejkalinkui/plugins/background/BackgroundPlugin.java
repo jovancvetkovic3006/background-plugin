@@ -27,6 +27,8 @@ import android.util.Log;
 import android.provider.Settings;
 import android.net.Uri;
 import android.Manifest;
+import android.view.View;
+import android.widget.RemoteViews;
 import androidx.core.content.ContextCompat;
 import android.content.pm.PackageManager;
 import androidx.core.app.ActivityCompat;
@@ -553,17 +555,9 @@ public class BackgroundPlugin extends Plugin {
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
 
-        // Background circle color based on glucose level (user thresholds)
+        // Background circle color based on glucose level
         Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        if (sgValue > 0 && sgValue < alarmLow) {
-            bgPaint.setColor(Color.parseColor("#C2255C")); // red - low
-        } else if (sgValue > 0 && sgValue <= alarmHigh) {
-            bgPaint.setColor(Color.parseColor("#0E9B8A")); // green - in range
-        } else if (sgValue > 0) {
-            bgPaint.setColor(Color.parseColor("#C77C1E")); // orange - high
-        } else {
-            bgPaint.setColor(Color.parseColor("#6C757D"));
-        }
+        bgPaint.setColor(rangeAccentColor(sgValue));
         canvas.drawCircle(size / 2f, size / 2f, size / 2f, bgPaint);
 
         // Glucose text
@@ -633,7 +627,6 @@ public class BackgroundPlugin extends Plugin {
                 showStaleOrDisconnected(sensorConnected ? "No fresh reading" : "Sensor disconnected");
             } else {
                 String trendArrow = getTrendArrow(json);
-                String title = last.getString("sg") + " mmol/L" + trendArrow + "  \u00b7  " + since.trim();
                 String statusText = "";
                 if (sgValue < alarmUrgentLow)
                     statusText = "Urgent low";
@@ -641,12 +634,6 @@ public class BackgroundPlugin extends Plugin {
                     statusText = "Low glucose";
                 else if (sgValue > alarmHigh)
                     statusText = "High glucose";
-                // Build body with status + details
-                StringBuilder body = new StringBuilder();
-                if (!statusText.isEmpty()) {
-                    body.append(statusText);
-                }
-                // Details section with top padding
                 StringBuilder details = new StringBuilder();
                 try {
                     JSONObject ai = json.optJSONObject("activeInsulin");
@@ -671,12 +658,9 @@ public class BackgroundPlugin extends Plugin {
                         details.append("\n");
                     details.append("Temp basal: active");
                 }
-                if (details.length() > 0) {
-                    if (body.length() > 0)
-                        body.append("\n");
-                    body.append(details);
-                }
-                showNotification(title, body.toString().trim(), sgValue, playSound);
+                showLiveGlucoseNotification(
+                        last.getString("sg"), trendArrow, since.trim(), statusText,
+                        details.toString().trim(), sgValue, playSound);
                 updateWidget(last.getString("sg"), trendArrow, since.trim(), statusText, sgValue, readingTs);
             }
 
@@ -694,6 +678,17 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void showNotification(String title, String body, double sgValue, boolean playSound) {
+        String glucose = "--";
+        if (sgValue > 0) {
+            glucose = String.format(Locale.US, "%.1f", sgValue);
+        }
+        showLiveGlucoseNotification(glucose, "", "", title != null ? title : "", body != null ? body : "", sgValue,
+                playSound);
+    }
+
+    /** Full-bleed range-colored ongoing notification (Live Activity style). */
+    private void showLiveGlucoseNotification(String glucose, String trendArrow, String age, String status,
+            String details, double sgValue, boolean playSound) {
         try {
             Context context = ctx();
             if (context == null) {
@@ -707,39 +702,48 @@ public class BackgroundPlugin extends Plugin {
             String channelId = playSound ? CHANNEL_ALERT : CHANNEL_NORMAL;
             ensureNotificationChannels();
 
-            // Open app on tap
             Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
             PendingIntent pendingIntent = PendingIntent.getActivity(
                     context, 0, launchIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-            // Refresh action button
             Intent refreshIntent = new Intent("ionic.jejkalinkui.ACTION_REFRESH");
             refreshIntent.setPackage(context.getPackageName());
             PendingIntent refreshPending = PendingIntent.getBroadcast(
                     context, 0, refreshIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-            // Color based on glucose level (user thresholds)
-            int accentColor;
-            if (sgValue > 0 && sgValue < alarmLow) {
-                accentColor = Color.parseColor("#C2255C");
-            } else if (sgValue > 0 && sgValue <= alarmHigh) {
-                accentColor = Color.parseColor("#0E9B8A");
-            } else if (sgValue > 0) {
-                accentColor = Color.parseColor("#C77C1E");
-            } else {
-                accentColor = Color.parseColor("#6C757D");
+            int accentColor = rangeAccentColor(sgValue);
+            String valueText = (glucose != null && !glucose.isEmpty()) ? glucose : "--";
+            String trendText = trendArrow != null ? trendArrow.trim() : "";
+            String ageText = (age != null && !age.isEmpty()) ? age : "--";
+            String statusText = status != null ? status.trim() : "";
+            if (statusText.isEmpty() && sgValue > 0) {
+                if (sgValue < 3.0)
+                    statusText = "Very low";
+                else if (sgValue < 3.9)
+                    statusText = "Low";
+                else if (sgValue <= 10.0)
+                    statusText = "In range";
+                else if (sgValue <= 13.9)
+                    statusText = "High";
+                else
+                    statusText = "Very high";
+            }
+            String detailsText = details != null ? details.trim() : "";
+
+            String fallbackTitle = valueText + " mmol/L"
+                    + (trendText.isEmpty() ? "" : " " + trendText)
+                    + "  \u00b7  " + ageText;
+            String fallbackBody = statusText;
+            if (!detailsText.isEmpty()) {
+                fallbackBody = statusText.isEmpty() ? detailsText : statusText + "\n" + detailsText;
             }
 
-            // Large icon with glucose value
-            Bitmap largeIcon = createGlucoseIcon(sgValue);
-
             NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
-                    .setContentTitle(title)
-                    .setContentText(body)
+                    .setContentTitle(fallbackTitle)
+                    .setContentText(fallbackBody)
                     .setSmallIcon(getNotificationIcon(context))
-                    .setLargeIcon(largeIcon)
                     .setAutoCancel(false)
                     .setOngoing(true)
                     .setOnlyAlertOnce(!playSound)
@@ -749,26 +753,91 @@ public class BackgroundPlugin extends Plugin {
                     .setColor(accentColor)
                     .addAction(android.R.drawable.ic_popup_sync, "Refresh", refreshPending);
 
-            // Expanded style with extra info
-            if (body != null && !body.isEmpty()) {
+            RemoteViews compact = buildGlucoseRemoteViews(context, "notification_glucose", valueText, trendText,
+                    ageText, statusText, detailsText, accentColor, false);
+            RemoteViews expanded = buildGlucoseRemoteViews(context, "notification_glucose_expanded", valueText,
+                    trendText, ageText, statusText, detailsText, accentColor, true);
+
+            if (compact != null) {
+                builder.setCustomContentView(compact);
+                builder.setCustomHeadsUpContentView(compact);
+            }
+            if (expanded != null) {
+                builder.setCustomBigContentView(expanded);
+            }
+            if (compact == null && fallbackBody != null && !fallbackBody.isEmpty()) {
                 builder.setStyle(new NotificationCompat.BigTextStyle()
-                        .bigText(body)
-                        .setBigContentTitle(title));
+                        .bigText(fallbackBody)
+                        .setBigContentTitle(fallbackTitle));
+                builder.setLargeIcon(createGlucoseIcon(sgValue));
             }
 
             notificationManager.notify(NOTIFICATION_ID, builder.build());
             this.doLogg("showNotification: notified OK");
 
-            // When Ionic bridge is gone, deliver a critical backup for lows (AlarmsService can't run).
             boolean bridgeAlive = pluginRef != null && pluginRef.get() != null;
             if (!bridgeAlive && sgValue > 0 && sgValue < alarmLow) {
                 String critTitle = sgValue < alarmUrgentLow ? "Urgent low" : "Low glucose";
-                showCriticalNotification(context, notificationManager, critTitle, title, pendingIntent);
+                showCriticalNotification(context, notificationManager, critTitle, fallbackTitle, pendingIntent);
             }
         } catch (Exception e) {
             this.doLogg("showNotification CRASHED: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+    /** Clinical range colors (tokens), not alarm thresholds. */
+    private int rangeAccentColor(double sgValue) {
+        if (sgValue <= 0)
+            return Color.parseColor("#6C757D");
+        if (sgValue < 3.0)
+            return Color.parseColor("#9B1B47");
+        if (sgValue < 3.9)
+            return Color.parseColor("#C2255C");
+        if (sgValue <= 10.0)
+            return Color.parseColor("#0E9B8A");
+        if (sgValue <= 13.9)
+            return Color.parseColor("#C77C1E");
+        return Color.parseColor("#9A5E10");
+    }
+
+    private RemoteViews buildGlucoseRemoteViews(Context context, String layoutName, String value, String trend,
+            String age, String status, String details, int accentColor, boolean expanded) {
+        int layoutId = context.getResources().getIdentifier(layoutName, "layout", context.getPackageName());
+        if (layoutId == 0) {
+            this.doLogg("Missing layout " + layoutName);
+            return null;
+        }
+        int rootId = context.getResources().getIdentifier("notif_root", "id", context.getPackageName());
+        int valueId = context.getResources().getIdentifier("notif_value", "id", context.getPackageName());
+        int trendId = context.getResources().getIdentifier("notif_trend", "id", context.getPackageName());
+        int ageId = context.getResources().getIdentifier("notif_age", "id", context.getPackageName());
+        int statusId = context.getResources().getIdentifier("notif_status", "id", context.getPackageName());
+        int detailsId = context.getResources().getIdentifier("notif_details", "id", context.getPackageName());
+
+        RemoteViews views = new RemoteViews(context.getPackageName(), layoutId);
+        if (rootId != 0) {
+            views.setInt(rootId, "setBackgroundColor", accentColor);
+        }
+        if (valueId != 0) {
+            views.setTextViewText(valueId, value);
+        }
+        if (trendId != 0) {
+            views.setTextViewText(trendId, trend);
+            views.setViewVisibility(trendId, trend.isEmpty() ? View.GONE : View.VISIBLE);
+        }
+        if (ageId != 0) {
+            views.setTextViewText(ageId, age);
+        }
+        if (statusId != 0) {
+            views.setTextViewText(statusId, status);
+            views.setViewVisibility(statusId, status.isEmpty() ? View.GONE : View.VISIBLE);
+        }
+        if (expanded && detailsId != 0) {
+            views.setTextViewText(detailsId, details);
+            views.setViewVisibility(detailsId, details.isEmpty() ? View.GONE : View.VISIBLE);
+        }
+        return views;
     }
 
     private void showCriticalNotification(Context context, NotificationManager notificationManager,
@@ -1425,13 +1494,11 @@ public class BackgroundPlugin extends Plugin {
             lastMs = lastReadingTsMs;
         }
         String since = formatAgeEn(lastMs);
-        String title;
         if (sg > 0 && glucose != null && !glucose.equals("--")) {
-            title = glucose + " mmol/L" + trendArrow + "  \u00b7  " + since + "  \u00b7  " + reason;
-            showNotification(title, reason + "\nLast reading " + since, sg, false);
+            showLiveGlucoseNotification(glucose, trendArrow, since, reason, "Last reading " + since, sg, false);
             updateWidget(glucose, trendArrow, since, reason, sg);
         } else {
-            showNotification(reason, "", 0, false);
+            showLiveGlucoseNotification("--", "", since, reason, "", 0, false);
             updateWidget("--", "", since, reason, 0);
         }
     }
@@ -1608,7 +1675,6 @@ public class BackgroundPlugin extends Plugin {
                     showStaleOrDisconnected(sensorConnected ? "No fresh reading" : "Sensor disconnected");
                 } else {
                     String trendArrow = getTrendArrow(nestedPatientData);
-                    String title = last.optString("sg", "0") + " mmol/L" + trendArrow + "  \u00b7  " + timeSince.trim();
                     String statusText = "";
                     if (sg > 0 && sg < alarmUrgentLow)
                         statusText = "Urgent low";
@@ -1616,10 +1682,6 @@ public class BackgroundPlugin extends Plugin {
                         statusText = "Low glucose";
                     else if (sg > alarmHigh)
                         statusText = "High glucose";
-                    StringBuilder body = new StringBuilder();
-                    if (!statusText.isEmpty()) {
-                        body.append(statusText);
-                    }
                     StringBuilder details = new StringBuilder();
                     try {
                         JSONObject ai = nestedPatientData.optJSONObject("activeInsulin");
@@ -1645,12 +1707,9 @@ public class BackgroundPlugin extends Plugin {
                             details.append("\n");
                         details.append("Temp basal: active");
                     }
-                    if (details.length() > 0) {
-                        if (body.length() > 0)
-                            body.append("\n");
-                        body.append(details);
-                    }
-                    showNotification(title, body.toString().trim(), sg, playSound);
+                    showLiveGlucoseNotification(
+                            last.optString("sg", "--"), trendArrow, timeSince.trim(), statusText,
+                            details.toString().trim(), sg, playSound);
                     updateWidget(last.optString("sg", "--"), trendArrow, timeSince.trim(), statusText, sg, readingTs);
                 }
 

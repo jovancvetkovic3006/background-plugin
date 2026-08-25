@@ -27,8 +27,6 @@ import android.util.Log;
 import android.provider.Settings;
 import android.net.Uri;
 import android.Manifest;
-import android.view.View;
-import android.widget.RemoteViews;
 import androidx.core.content.ContextCompat;
 import android.content.pm.PackageManager;
 import androidx.core.app.ActivityCompat;
@@ -573,76 +571,6 @@ public class BackgroundPlugin extends Plugin {
         return bitmap;
     }
 
-    /** Full-bleed colored Live Activity card (drawn bitmap → ImageView RemoteViews). */
-    private Bitmap createLiveActivityBanner(String value, String trend, String age, String status,
-            String details, int accentColor) {
-        int w = 1080;
-        int h = details != null && !details.isEmpty() ? 280 : 220;
-        Bitmap bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-        canvas.drawColor(accentColor);
-
-        float left = 48f;
-        float topValue = 92f;
-
-        Paint valuePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        valuePaint.setColor(Color.WHITE);
-        valuePaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        valuePaint.setTextSize(110f);
-        String valueText = value != null ? value : "--";
-        canvas.drawText(valueText, left, topValue, valuePaint);
-
-        float cursor = left + valuePaint.measureText(valueText) + 18f;
-        if (trend != null && !trend.isEmpty()) {
-            Paint trendPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            trendPaint.setColor(Color.WHITE);
-            trendPaint.setTextSize(64f);
-            canvas.drawText(trend.trim(), cursor, topValue - 8f, trendPaint);
-            cursor += trendPaint.measureText(trend.trim()) + 20f;
-        }
-
-        Paint unitPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        unitPaint.setColor(Color.WHITE);
-        unitPaint.setTextSize(34f);
-        unitPaint.setAlpha(210);
-        canvas.drawText("mmol/L", cursor, topValue - 10f, unitPaint);
-
-        if (age != null && !age.isEmpty()) {
-            Paint agePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            agePaint.setColor(Color.WHITE);
-            agePaint.setTextSize(34f);
-            agePaint.setAlpha(230);
-            float ageW = agePaint.measureText(age);
-            canvas.drawText(age, w - 48f - ageW, 56f, agePaint);
-        }
-
-        float y = 150f;
-        if (status != null && !status.isEmpty()) {
-            Paint statusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            statusPaint.setColor(Color.WHITE);
-            statusPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            statusPaint.setTextSize(38f);
-            canvas.drawText(status, left, y, statusPaint);
-            y += 48f;
-        }
-
-        if (details != null && !details.isEmpty()) {
-            Paint detPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            detPaint.setColor(Color.WHITE);
-            detPaint.setTextSize(30f);
-            detPaint.setAlpha(220);
-            canvas.drawText(details.replace("\n", "  ·  "), left, Math.min(y, h - 36f), detPaint);
-        }
-
-        // Soft bottom highlight line
-        Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
-        edge.setColor(0x22FFFFFF);
-        edge.setStrokeWidth(3f);
-        canvas.drawLine(0, h - 2f, w, h - 2f, edge);
-
-        return bitmap;
-    }
-
     private String getTrendArrow(JSONObject json) {
         try {
             String trend = json.optString("lastSGTrend", "");
@@ -756,7 +684,7 @@ public class BackgroundPlugin extends Plugin {
                 playSound);
     }
 
-    /** Full-bleed range-colored ongoing notification (Live Activity style). */
+    /** Classic ongoing glucose notification (title + body + colored large icon). */
     private void showLiveGlucoseNotification(String glucose, String trendArrow, String age, String status,
             String details, double sgValue, boolean playSound) {
         try {
@@ -802,87 +730,41 @@ public class BackgroundPlugin extends Plugin {
             }
             String detailsText = details != null ? details.trim() : "";
 
-            String fallbackTitle = valueText + " mmol/L"
+            String title = valueText + " mmol/L"
                     + (trendText.isEmpty() ? "" : " " + trendText)
                     + "  \u00b7  " + ageText;
-            String fallbackBody = statusText;
+            String body = statusText;
             if (!detailsText.isEmpty()) {
-                fallbackBody = statusText.isEmpty() ? detailsText : statusText + "\n" + detailsText;
+                body = statusText.isEmpty() ? detailsText : statusText + "\n" + detailsText;
             }
 
             NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
+                    .setContentTitle(title)
+                    .setContentText(body)
                     .setSmallIcon(getNotificationIcon(context))
-                    .setContentTitle(fallbackTitle)
-                    .setContentText(fallbackBody)
+                    .setLargeIcon(createGlucoseIcon(sgValue))
                     .setAutoCancel(false)
                     .setOngoing(true)
                     .setOnlyAlertOnce(!playSound)
-                    .setShowWhen(false)
                     .setContentIntent(pendingIntent)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setColor(accentColor)
                     .addAction(android.R.drawable.ic_popup_sync, "Refresh", refreshPending);
 
-            // Full-bleed card: single ImageView RemoteViews (no title/body chrome around it).
-            boolean usedFullBleed = false;
-            try {
-                Bitmap banner = createLiveActivityBanner(valueText, trendText, ageText, statusText,
-                        detailsText, accentColor);
-                int layoutId = context.getResources().getIdentifier(
-                        "notification_glucose_full", "layout", context.getPackageName());
-                int bannerId = context.getResources().getIdentifier(
-                        "notif_banner", "id", context.getPackageName());
-                int rootId = context.getResources().getIdentifier(
-                        "notif_root", "id", context.getPackageName());
-                if (layoutId != 0 && bannerId != 0) {
-                    RemoteViews rv = new RemoteViews(context.getPackageName(), layoutId);
-                    if (rootId != 0) {
-                        rv.setInt(rootId, "setBackgroundColor", accentColor);
-                    }
-                    rv.setImageViewBitmap(bannerId, banner);
-                    builder.setCustomContentView(rv);
-                    builder.setCustomBigContentView(rv);
-                    builder.setCustomHeadsUpContentView(rv);
-                    usedFullBleed = true;
-                }
-            } catch (Throwable t) {
-                this.doLogg("Full-bleed notification failed: " + t.getMessage());
-            }
-
-            if (!usedFullBleed) {
-                builder.setLargeIcon(createGlucoseIcon(sgValue));
-                try {
-                    Bitmap banner = createLiveActivityBanner(valueText, trendText, ageText, statusText,
-                            detailsText, accentColor);
-                    builder.setStyle(new NotificationCompat.BigPictureStyle()
-                            .bigPicture(banner)
-                            .bigLargeIcon((Bitmap) null)
-                            .setBigContentTitle(fallbackTitle)
-                            .setSummaryText(statusText.isEmpty() ? "JejkaLink" : statusText));
-                } catch (Throwable t) {
-                    if (fallbackBody != null && !fallbackBody.isEmpty()) {
-                        builder.setStyle(new NotificationCompat.BigTextStyle()
-                                .bigText(fallbackBody)
-                                .setBigContentTitle(fallbackTitle));
-                    }
-                }
-            }
-
-            if (usedFullBleed) {
-                // Suppress duplicate system title/body chrome around the card
-                builder.setContentTitle("");
-                builder.setContentText("");
-                builder.setLargeIcon((Bitmap) null);
+            if (body != null && !body.isEmpty()) {
+                builder.setStyle(new NotificationCompat.BigTextStyle()
+                        .bigText(body)
+                        .setBigContentTitle(title));
             }
 
             notificationManager.notify(NOTIFICATION_ID, builder.build());
-            this.doLogg("showNotification: notified OK fullBleed=" + usedFullBleed);
+            this.doLogg("showNotification: notified OK");
 
             boolean bridgeAlive = pluginRef != null && pluginRef.get() != null;
             if (!bridgeAlive && sgValue > 0 && sgValue < alarmLow) {
                 String critTitle = sgValue < alarmUrgentLow ? "Urgent low" : "Low glucose";
-                showCriticalNotification(context, notificationManager, critTitle, fallbackTitle, pendingIntent);
+                showCriticalNotification(context, notificationManager, critTitle, title, pendingIntent);
             }
         } catch (Exception e) {
             this.doLogg("showNotification CRASHED: " + e.getMessage());
@@ -905,44 +787,6 @@ public class BackgroundPlugin extends Plugin {
         return Color.parseColor("#9A5E10");
     }
 
-    private RemoteViews buildGlucoseRemoteViews(Context context, String layoutName, String value, String trend,
-            String age, String status, String details, int accentColor, boolean expanded) {
-        int layoutId = context.getResources().getIdentifier(layoutName, "layout", context.getPackageName());
-        if (layoutId == 0) {
-            this.doLogg("Missing layout " + layoutName);
-            return null;
-        }
-        int rootId = context.getResources().getIdentifier("notif_root", "id", context.getPackageName());
-        int valueId = context.getResources().getIdentifier("notif_value", "id", context.getPackageName());
-        int trendId = context.getResources().getIdentifier("notif_trend", "id", context.getPackageName());
-        int ageId = context.getResources().getIdentifier("notif_age", "id", context.getPackageName());
-        int statusId = context.getResources().getIdentifier("notif_status", "id", context.getPackageName());
-        int detailsId = context.getResources().getIdentifier("notif_details", "id", context.getPackageName());
-
-        RemoteViews views = new RemoteViews(context.getPackageName(), layoutId);
-        if (rootId != 0) {
-            views.setInt(rootId, "setBackgroundColor", accentColor);
-        }
-        if (valueId != 0) {
-            views.setTextViewText(valueId, value);
-        }
-        if (trendId != 0) {
-            views.setTextViewText(trendId, trend);
-            views.setViewVisibility(trendId, trend.isEmpty() ? View.GONE : View.VISIBLE);
-        }
-        if (ageId != 0) {
-            views.setTextViewText(ageId, age);
-        }
-        if (statusId != 0) {
-            views.setTextViewText(statusId, status);
-            views.setViewVisibility(statusId, status.isEmpty() ? View.GONE : View.VISIBLE);
-        }
-        if (expanded && detailsId != 0) {
-            views.setTextViewText(detailsId, details);
-            views.setViewVisibility(detailsId, details.isEmpty() ? View.GONE : View.VISIBLE);
-        }
-        return views;
-    }
 
     private void showCriticalNotification(Context context, NotificationManager notificationManager,
             String critTitle, String detail, PendingIntent tapIntent) {

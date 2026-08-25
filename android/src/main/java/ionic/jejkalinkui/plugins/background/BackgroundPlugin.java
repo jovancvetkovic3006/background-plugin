@@ -624,11 +624,12 @@ public class BackgroundPlugin extends Plugin {
                 sensorConnected = json.optBoolean("conduitSensorInRange", false);
             }
 
-            boolean playSound = (sgValue < alarmLow || sgValue > alarmHigh);
+            long readingTs = last.optLong("timestamp", 0);
+            boolean hasValidReading = sgValue > 0 && readingTs > 0;
+            boolean playSound = hasValidReading && (sgValue < alarmLow || sgValue > alarmHigh);
 
-            if (!sensorConnected) {
-                showNotification("Sensor disconnected", "", 0, false);
-                updateWidget("--", "", "Sensor disconnected", "", 0);
+            if (!sensorConnected || !hasValidReading) {
+                showStaleOrDisconnected(sensorConnected ? "No fresh reading" : "Sensor disconnected");
             } else {
                 String trendArrow = getTrendArrow(json);
                 String title = last.getString("sg") + " mmol/L" + trendArrow + "  \u00b7  " + since.trim();
@@ -675,7 +676,7 @@ public class BackgroundPlugin extends Plugin {
                     body.append(details);
                 }
                 showNotification(title, body.toString().trim(), sgValue, playSound);
-                updateWidget(last.getString("sg"), trendArrow, since.trim(), statusText, sgValue);
+                updateWidget(last.getString("sg"), trendArrow, since.trim(), statusText, sgValue, readingTs);
             }
 
             // Check for one-time status alerts
@@ -1312,6 +1313,11 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void updateWidget(String glucoseValue, String trendArrow, String timeSince, String status, double sgValue) {
+        updateWidget(glucoseValue, trendArrow, timeSince, status, sgValue, 0L);
+    }
+
+    private void updateWidget(String glucoseValue, String trendArrow, String timeSince, String status,
+            double sgValue, long readingTsMs) {
         try {
             Context context = ctx();
             if (context == null) {
@@ -1319,13 +1325,16 @@ public class BackgroundPlugin extends Plugin {
             }
             android.content.SharedPreferences prefs = context.getSharedPreferences("glucose_widget_prefs",
                     Context.MODE_PRIVATE);
-            prefs.edit()
+            android.content.SharedPreferences.Editor ed = prefs.edit()
                     .putString("glucose_value", glucoseValue)
                     .putString("trend_arrow", trendArrow)
                     .putString("time_since", timeSince)
                     .putString("status", status)
-                    .putString("sg_double", String.valueOf(sgValue))
-                    .apply();
+                    .putString("sg_double", String.valueOf(sgValue));
+            if (readingTsMs > 0 && sgValue > 0) {
+                ed.putLong("last_good_reading_ms", readingTsMs);
+            }
+            ed.apply();
 
             Intent intent = new Intent("ionic.jejkalinkui.UPDATE_GLUCOSE_WIDGET");
             intent.setComponent(new android.content.ComponentName(context, "ionic.jejkalinkui.GlucoseWidgetProvider"));
@@ -1333,6 +1342,56 @@ public class BackgroundPlugin extends Plugin {
         } catch (Exception e) {
             Log.e("BackgroundPlugin", "Widget update failed", e);
         }
+    }
+
+    /** Keep last real glucose on screen when CareLink has no fresh in-range reading. */
+    private void showStaleOrDisconnected(String reason) {
+        Context context = ctx();
+        if (context == null) {
+            showNotification(reason, "", 0, false);
+            return;
+        }
+        android.content.SharedPreferences prefs = context.getSharedPreferences("glucose_widget_prefs",
+                Context.MODE_PRIVATE);
+        String glucose = prefs.getString("glucose_value", "--");
+        String trendArrow = prefs.getString("trend_arrow", "");
+        double sg = 0;
+        try {
+            sg = Double.parseDouble(prefs.getString("sg_double", "0"));
+        } catch (Exception ignored) {
+        }
+        long lastMs = prefs.getLong("last_good_reading_ms", 0);
+        if (lastMs <= 0) {
+            lastMs = lastReadingTsMs;
+        }
+        String since = formatAgeEn(lastMs);
+        String title;
+        if (sg > 0 && glucose != null && !glucose.equals("--")) {
+            title = glucose + " mmol/L" + trendArrow + "  \u00b7  " + since + "  \u00b7  " + reason;
+            showNotification(title, reason + "\nLast reading " + since, sg, false);
+            updateWidget(glucose, trendArrow, since, reason, sg);
+        } else {
+            showNotification(reason, "", 0, false);
+            updateWidget("--", "", since, reason, 0);
+        }
+    }
+
+    private String formatAgeEn(long readingTsMs) {
+        if (readingTsMs <= 0) {
+            return "--";
+        }
+        int minutes = (int) Math.max(0L, (System.currentTimeMillis() - readingTsMs) / 60000L);
+        if (minutes == 0) {
+            return "just now";
+        }
+        return formatMinutesHhMm(minutes) + " ago";
+    }
+
+    private String formatMinutesHhMm(int minutes) {
+        int m = Math.max(0, minutes);
+        int h = m / 60;
+        int rem = m % 60;
+        return String.format(Locale.US, "%02d:%02d", h, rem);
     }
 
     private int getNotificationIcon(Context context) {
@@ -1481,11 +1540,11 @@ public class BackgroundPlugin extends Plugin {
                 }
 
                 boolean sensorConnected = nestedPatientData.optBoolean("conduitSensorInRange", false);
-                boolean playSound = (sg > 0 && (sg < alarmLow || sg > alarmHigh));
+                boolean hasValidReading = sg > 0 && readingTs > 0;
+                boolean playSound = hasValidReading && (sg < alarmLow || sg > alarmHigh);
 
-                if (!sensorConnected) {
-                    showNotification("Sensor disconnected", "", 0, false);
-                    updateWidget("--", "", "Sensor disconnected", "", 0);
+                if (!sensorConnected || !hasValidReading) {
+                    showStaleOrDisconnected(sensorConnected ? "No fresh reading" : "Sensor disconnected");
                 } else {
                     String trendArrow = getTrendArrow(nestedPatientData);
                     String title = last.optString("sg", "0") + " mmol/L" + trendArrow + "  \u00b7  " + timeSince.trim();
@@ -1531,7 +1590,7 @@ public class BackgroundPlugin extends Plugin {
                         body.append(details);
                     }
                     showNotification(title, body.toString().trim(), sg, playSound);
-                    updateWidget(last.optString("sg", "--"), trendArrow, timeSince.trim(), statusText, sg);
+                    updateWidget(last.optString("sg", "--"), trendArrow, timeSince.trim(), statusText, sg, readingTs);
                 }
 
             } catch (Exception e) {
@@ -1657,19 +1716,20 @@ public class BackgroundPlugin extends Plugin {
                 }
 
                 if (rawTimestamp == 0) {
-                    rawTimestamp = System.currentTimeMillis();
+                    // Do not invent "now" — callers treat 0 as invalid / no fresh reading
+                    rawTimestamp = 0;
                 }
 
                 JSONObject result = new JSONObject();
                 result.put("sg", String.format(Locale.US, "%.1f", sgMmol));
-                result.put("timestamp", rawTimestamp); // return as raw number
+                result.put("timestamp", rawTimestamp);
                 return result;
             }
 
             // Fallback
             JSONObject fallback = new JSONObject();
             fallback.put("sg", "0.0");
-            fallback.put("timestamp", System.currentTimeMillis());
+            fallback.put("timestamp", 0);
             return fallback;
 
         } catch (Exception e) {
@@ -1677,7 +1737,7 @@ public class BackgroundPlugin extends Plugin {
             JSONObject fallback = new JSONObject();
             try {
                 fallback.put("sg", "0.0");
-                fallback.put("timestamp", System.currentTimeMillis());
+                fallback.put("timestamp", 0);
             } catch (JSONException ignored) {
             }
             return fallback;
@@ -1688,24 +1748,17 @@ public class BackgroundPlugin extends Plugin {
         try {
             JSONObject last = getLastGlicemia(data);
             if (last == null || !last.has("timestamp")) {
-                return "No last SG data";
+                return "--";
             }
 
-            long now = System.currentTimeMillis();
-            long lastTime = last.optLong("timestamp", now);
-
-            long diffMs = now - lastTime;
-            int minutes = (int) (diffMs / 60000);
-            int hours = minutes / 60;
-            int remainingMinutes = minutes % 60;
-
-            return (hours > 0)
-                    ? String.format(" pre %dh %dm", hours, remainingMinutes)
-                    : String.format(" pre %dm", minutes);
-
+            long lastTime = last.optLong("timestamp", 0);
+            if (lastTime <= 0) {
+                return "--";
+            }
+            return formatAgeEn(lastTime);
         } catch (Exception e) {
             e.printStackTrace();
-            return "No valid SG data";
+            return "--";
         }
     }
 

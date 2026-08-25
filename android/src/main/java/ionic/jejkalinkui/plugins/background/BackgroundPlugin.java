@@ -10,6 +10,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Notification;
 import android.content.Intent;
+import android.content.ClipData;
 import android.os.Build;
 import android.content.Context;
 
@@ -44,15 +45,20 @@ import java.util.Calendar;
 import androidx.core.content.ContextCompat;
 
 import java.io.OutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.BufferedReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import java.util.Base64;
 import java.nio.charset.StandardCharsets;
+import androidx.core.content.FileProvider;
 import org.json.JSONObject;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -1110,6 +1116,77 @@ public class BackgroundPlugin extends Plugin {
         JSObject result = new JSObject();
         result.put("granted", granted);
         call.resolve(result);
+    }
+
+    /**
+     * Zip plain text and open the system share/email sheet with the zip attached.
+     * mailto: cannot carry large CareLink payloads; this keeps full dump data.
+     */
+    @PluginMethod
+    public void shareEmailZip(PluginCall call) {
+        String text = call.getString("text", "");
+        String subject = call.getString("subject", "JejkaLink");
+        String email = call.getString("email", "jovanca.cvetkovic@gmail.com");
+        String body = call.getString("body", "Full dump attached as zip.");
+        String fileName = call.getString("fileName", "jejkalink-dump.zip");
+        String entryName = call.getString("entryName", "dump.txt");
+
+        if (text == null || text.isEmpty()) {
+            call.reject("Missing text");
+            return;
+        }
+        if (!fileName.endsWith(".zip")) {
+            fileName = fileName + ".zip";
+        }
+
+        Context context = ctx();
+        if (context == null) {
+            call.reject("No context");
+            return;
+        }
+
+        try {
+            File zipFile = new File(context.getCacheDir(), fileName);
+            try (FileOutputStream fos = new FileOutputStream(zipFile);
+                 ZipOutputStream zos = new ZipOutputStream(fos)) {
+                zos.putNextEntry(new ZipEntry(entryName));
+                byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+                zos.write(bytes);
+                zos.closeEntry();
+            }
+
+            Uri uri = FileProvider.getUriForFile(
+                    context,
+                    context.getPackageName() + ".fileprovider",
+                    zipFile
+            );
+
+            Intent intent = new Intent(Intent.ACTION_SEND);
+            intent.setType("application/zip");
+            intent.putExtra(Intent.EXTRA_EMAIL, new String[]{ email });
+            intent.putExtra(Intent.EXTRA_SUBJECT, subject);
+            intent.putExtra(Intent.EXTRA_TEXT, body);
+            intent.putExtra(Intent.EXTRA_STREAM, uri);
+            intent.setClipData(ClipData.newRawUri(entryName, uri));
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+            Intent chooser = Intent.createChooser(intent, "Send dump");
+            Activity activity = getActivity();
+            if (activity != null) {
+                activity.startActivity(chooser);
+            } else {
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(chooser);
+            }
+
+            JSObject result = new JSObject();
+            result.put("success", true);
+            result.put("bytes", text.length());
+            call.resolve(result);
+        } catch (Exception e) {
+            Log.e("BackgroundPlugin", "shareEmailZip failed", e);
+            call.reject("shareEmailZip failed: " + e.getMessage(), e);
+        }
     }
 
     @PluginMethod

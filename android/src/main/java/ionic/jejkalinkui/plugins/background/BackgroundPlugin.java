@@ -573,59 +573,72 @@ public class BackgroundPlugin extends Plugin {
         return bitmap;
     }
 
-    /** Full-bleed colored banner for BigPictureStyle (safer than custom RemoteViews). */
+    /** Full-bleed colored Live Activity card (drawn bitmap → ImageView RemoteViews). */
     private Bitmap createLiveActivityBanner(String value, String trend, String age, String status,
             String details, int accentColor) {
-        int w = 960;
-        int h = details != null && !details.isEmpty() ? 320 : 240;
+        int w = 1080;
+        int h = details != null && !details.isEmpty() ? 280 : 220;
         Bitmap bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         canvas.drawColor(accentColor);
 
+        float left = 48f;
+        float topValue = 92f;
+
         Paint valuePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         valuePaint.setColor(Color.WHITE);
         valuePaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        valuePaint.setTextSize(96f);
-        canvas.drawText(value != null ? value : "--", 48f, 110f, valuePaint);
+        valuePaint.setTextSize(110f);
+        String valueText = value != null ? value : "--";
+        canvas.drawText(valueText, left, topValue, valuePaint);
 
-        Paint trendPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        trendPaint.setColor(Color.WHITE);
-        trendPaint.setTextSize(64f);
-        float valueWidth = valuePaint.measureText(value != null ? value : "--");
+        float cursor = left + valuePaint.measureText(valueText) + 18f;
         if (trend != null && !trend.isEmpty()) {
-            canvas.drawText(trend, 48f + valueWidth + 16f, 100f, trendPaint);
+            Paint trendPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            trendPaint.setColor(Color.WHITE);
+            trendPaint.setTextSize(64f);
+            canvas.drawText(trend.trim(), cursor, topValue - 8f, trendPaint);
+            cursor += trendPaint.measureText(trend.trim()) + 20f;
         }
-
-        Paint metaPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        metaPaint.setColor(Color.WHITE);
-        metaPaint.setTextSize(36f);
-        metaPaint.setAlpha(230);
-        String ageText = age != null ? age : "";
-        float ageW = metaPaint.measureText(ageText);
-        canvas.drawText(ageText, w - 48f - ageW, 90f, metaPaint);
 
         Paint unitPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         unitPaint.setColor(Color.WHITE);
-        unitPaint.setTextSize(32f);
-        unitPaint.setAlpha(200);
-        canvas.drawText("mmol/L", 48f, 160f, unitPaint);
+        unitPaint.setTextSize(34f);
+        unitPaint.setAlpha(210);
+        canvas.drawText("mmol/L", cursor, topValue - 10f, unitPaint);
 
+        if (age != null && !age.isEmpty()) {
+            Paint agePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            agePaint.setColor(Color.WHITE);
+            agePaint.setTextSize(34f);
+            agePaint.setAlpha(230);
+            float ageW = agePaint.measureText(age);
+            canvas.drawText(age, w - 48f - ageW, 56f, agePaint);
+        }
+
+        float y = 150f;
         if (status != null && !status.isEmpty()) {
             Paint statusPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
             statusPaint.setColor(Color.WHITE);
             statusPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            statusPaint.setTextSize(40f);
-            canvas.drawText(status, 48f, 215f, statusPaint);
+            statusPaint.setTextSize(38f);
+            canvas.drawText(status, left, y, statusPaint);
+            y += 48f;
         }
 
         if (details != null && !details.isEmpty()) {
             Paint detPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
             detPaint.setColor(Color.WHITE);
-            detPaint.setTextSize(32f);
+            detPaint.setTextSize(30f);
             detPaint.setAlpha(220);
-            String oneLine = details.replace("\n", " · ");
-            canvas.drawText(oneLine, 48f, 280f, detPaint);
+            canvas.drawText(details.replace("\n", "  ·  "), left, Math.min(y, h - 36f), detPaint);
         }
+
+        // Soft bottom highlight line
+        Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
+        edge.setColor(0x22FFFFFF);
+        edge.setStrokeWidth(3f);
+        canvas.drawLine(0, h - 2f, w, h - 2f, edge);
 
         return bitmap;
     }
@@ -798,40 +811,73 @@ public class BackgroundPlugin extends Plugin {
             }
 
             NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
+                    .setSmallIcon(getNotificationIcon(context))
                     .setContentTitle(fallbackTitle)
                     .setContentText(fallbackBody)
-                    .setSmallIcon(getNotificationIcon(context))
                     .setAutoCancel(false)
                     .setOngoing(true)
                     .setOnlyAlertOnce(!playSound)
+                    .setShowWhen(false)
                     .setContentIntent(pendingIntent)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setColor(accentColor)
-                    .setLargeIcon(createGlucoseIcon(sgValue))
                     .addAction(android.R.drawable.ic_popup_sync, "Refresh", refreshPending);
 
-            // Prefer a drawn banner over custom RemoteViews — OEM SystemUI often
-            // crashes the app process when inflating complex custom notification layouts.
+            // Full-bleed card: single ImageView RemoteViews (no title/body chrome around it).
+            boolean usedFullBleed = false;
             try {
                 Bitmap banner = createLiveActivityBanner(valueText, trendText, ageText, statusText,
                         detailsText, accentColor);
-                builder.setStyle(new NotificationCompat.BigPictureStyle()
-                        .bigPicture(banner)
-                        .bigLargeIcon((Bitmap) null)
-                        .setBigContentTitle(fallbackTitle)
-                        .setSummaryText(statusText.isEmpty() ? "JejkaLink" : statusText));
+                int layoutId = context.getResources().getIdentifier(
+                        "notification_glucose_full", "layout", context.getPackageName());
+                int bannerId = context.getResources().getIdentifier(
+                        "notif_banner", "id", context.getPackageName());
+                int rootId = context.getResources().getIdentifier(
+                        "notif_root", "id", context.getPackageName());
+                if (layoutId != 0 && bannerId != 0) {
+                    RemoteViews rv = new RemoteViews(context.getPackageName(), layoutId);
+                    if (rootId != 0) {
+                        rv.setInt(rootId, "setBackgroundColor", accentColor);
+                    }
+                    rv.setImageViewBitmap(bannerId, banner);
+                    builder.setCustomContentView(rv);
+                    builder.setCustomBigContentView(rv);
+                    builder.setCustomHeadsUpContentView(rv);
+                    usedFullBleed = true;
+                }
             } catch (Throwable t) {
-                this.doLogg("Banner style failed, BigText fallback: " + t.getMessage());
-                if (fallbackBody != null && !fallbackBody.isEmpty()) {
-                    builder.setStyle(new NotificationCompat.BigTextStyle()
-                            .bigText(fallbackBody)
-                            .setBigContentTitle(fallbackTitle));
+                this.doLogg("Full-bleed notification failed: " + t.getMessage());
+            }
+
+            if (!usedFullBleed) {
+                builder.setLargeIcon(createGlucoseIcon(sgValue));
+                try {
+                    Bitmap banner = createLiveActivityBanner(valueText, trendText, ageText, statusText,
+                            detailsText, accentColor);
+                    builder.setStyle(new NotificationCompat.BigPictureStyle()
+                            .bigPicture(banner)
+                            .bigLargeIcon((Bitmap) null)
+                            .setBigContentTitle(fallbackTitle)
+                            .setSummaryText(statusText.isEmpty() ? "JejkaLink" : statusText));
+                } catch (Throwable t) {
+                    if (fallbackBody != null && !fallbackBody.isEmpty()) {
+                        builder.setStyle(new NotificationCompat.BigTextStyle()
+                                .bigText(fallbackBody)
+                                .setBigContentTitle(fallbackTitle));
+                    }
                 }
             }
 
+            if (usedFullBleed) {
+                // Suppress duplicate system title/body chrome around the card
+                builder.setContentTitle("");
+                builder.setContentText("");
+                builder.setLargeIcon((Bitmap) null);
+            }
+
             notificationManager.notify(NOTIFICATION_ID, builder.build());
-            this.doLogg("showNotification: notified OK");
+            this.doLogg("showNotification: notified OK fullBleed=" + usedFullBleed);
 
             boolean bridgeAlive = pluginRef != null && pluginRef.get() != null;
             if (!bridgeAlive && sgValue > 0 && sgValue < alarmLow) {

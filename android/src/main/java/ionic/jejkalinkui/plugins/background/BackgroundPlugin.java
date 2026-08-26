@@ -6,6 +6,7 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import android.app.AlarmManager;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Notification;
@@ -85,7 +86,10 @@ public class BackgroundPlugin extends Plugin {
     private static final String PREF_PATIENT_USERNAME = "patient_username";
     private static final String PREF_CONSECUTIVE_FAILURES = "consecutive_failures";
     private static final String PREF_LAST_READING_MS = "last_reading_ms";
+    private static final String PREF_NATIVE_ALARM_KEY = "native_alarm_key";
     private static final String PREF_COLLECTOR_ALERT_FIRED = "collector_alert_fired";
+    public static final String ACTION_POLL_ALARM = "ionic.jejkalinkui.plugins.background.POLL_ALARM";
+    private static final int POLL_ALARM_REQ = 71001;
     private static final int PHASE_MINUTE = 2;
     private static final int PHASE_OFFSET_SEC = 30;
 
@@ -437,6 +441,32 @@ public class BackgroundPlugin extends Plugin {
                     scheduleNextPoll(-1);
                 }
             }, delayMs, TimeUnit.MILLISECONDS);
+            scheduleWatchdogAlarm(delayMs);
+        }
+    }
+
+    /** xDrip-style RTC wakeup so polling survives after the in-process executor is killed. */
+    private void scheduleWatchdogAlarm(long delayMs) {
+        Context context = ctx();
+        if (context == null) return;
+        try {
+            AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+            if (am == null) return;
+            Intent intent = new Intent(context, PollAlarmReceiver.class);
+            intent.setAction(ACTION_POLL_ALARM);
+            PendingIntent pi = PendingIntent.getBroadcast(
+                    context,
+                    POLL_ALARM_REQ,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            long trigger = System.currentTimeMillis() + Math.max(delayMs, 30_000L);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pi);
+            } else {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pi);
+            }
+        } catch (Exception e) {
+            Log.w("BackgroundPlugin", "scheduleWatchdogAlarm failed", e);
         }
     }
 
@@ -926,6 +956,81 @@ public class BackgroundPlugin extends Plugin {
         } catch (Exception e) {
             call.reject("fireAlarmAlert failed: " + e.getMessage());
         }
+    }
+
+    /** Heads-up alarm that does not depend on the Ionic WebView being alive. */
+    private void fireNativeAlarm(String rule, String title, String body, boolean critical) {
+        Context context = ctx();
+        if (context == null) return;
+        try {
+            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            Intent intent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+            PendingIntent pendingIntent = PendingIntent.getActivity(
+                    context, 0, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            String channelId = critical ? CHANNEL_CRITICAL : CHANNEL_ALERT;
+            int notifId = ALARM_NOTIFICATION_BASE + Math.abs(rule.hashCode() % 80);
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
+                    .setContentTitle(title)
+                    .setContentText(body == null || body.isEmpty() ? title : body)
+                    .setSmallIcon(getNotificationIcon(context))
+                    .setAutoCancel(true)
+                    .setOngoing(false)
+                    .setContentIntent(pendingIntent)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setCategory(NotificationCompat.CATEGORY_ALARM)
+                    .setPriority(critical ? NotificationCompat.PRIORITY_MAX : NotificationCompat.PRIORITY_HIGH)
+                    .setDefaults(NotificationCompat.DEFAULT_ALL);
+            if (body != null && !body.isEmpty()) {
+                builder.setStyle(new NotificationCompat.BigTextStyle().bigText(body).setBigContentTitle(title));
+            }
+            if (critical) {
+                builder.setFullScreenIntent(pendingIntent, true);
+                builder.setColor(Color.parseColor("#C2255C"));
+            }
+            nm.notify(notifId, builder.build());
+            this.doLogg("native alarm: " + rule);
+        } catch (Exception e) {
+            Log.e("BackgroundPlugin", "fireNativeAlarm failed", e);
+        }
+    }
+
+    private void evaluateNativeAlarms(double sgMmol, long readingTsMs, boolean hasValidReading) {
+        String rule;
+        String title;
+        String body;
+        long ageMin = readingTsMs > 0
+                ? Math.max(0L, (System.currentTimeMillis() - readingTsMs) / 60000L)
+                : 999;
+        if (!hasValidReading || ageMin >= 20) {
+            rule = "stale";
+            title = ageMin >= 999 ? "No data" : "No data for " + String.format(Locale.US, "%02d:%02d", ageMin / 60, ageMin % 60);
+            body = "No fresh CGM reading. Check sensor and phone connection.";
+        } else if (sgMmol > 0 && sgMmol < alarmUrgentLow) {
+            rule = "urgent_low";
+            title = String.format(Locale.US, "Urgent low %.1f", sgMmol);
+            body = "Backup alarm — keep pump alerts on.";
+        } else if (sgMmol > 0 && sgMmol < alarmLow) {
+            rule = "low";
+            title = String.format(Locale.US, "Low %.1f", sgMmol);
+            body = "Below " + String.format(Locale.US, "%.1f", alarmLow) + " mmol/L.";
+        } else if (sgMmol > alarmHigh) {
+            rule = "high";
+            title = String.format(Locale.US, "High %.1f", sgMmol);
+            body = "Above " + String.format(Locale.US, "%.1f", alarmHigh) + " mmol/L.";
+        } else {
+            return;
+        }
+        String key = rule + "-" + (readingTsMs / 60_000L);
+        Context context = ctx();
+        if (context != null) {
+            android.content.SharedPreferences prefs = context.getSharedPreferences(TOKEN_PREFS, Context.MODE_PRIVATE);
+            if (key.equals(prefs.getString(PREF_NATIVE_ALARM_KEY, ""))) {
+                return;
+            }
+            prefs.edit().putString(PREF_NATIVE_ALARM_KEY, key).apply();
+        }
+        fireNativeAlarm(rule, title, body, true);
     }
 
     /** Persist / apply user alarm thresholds from Ionic Settings/Alarms. */
@@ -1730,6 +1835,7 @@ public class BackgroundPlugin extends Plugin {
                     this.doLogg("getData: skipped NGP snapshot, pumpCommunicationState=false");
                     recordPollSuccess(0);
                     showStaleOrDisconnected("Pump disconnected");
+                    evaluateNativeAlarms(0, lastReadingTsMs, false);
                     return;
                 }
 
@@ -1806,6 +1912,7 @@ public class BackgroundPlugin extends Plugin {
                             details.toString().trim(), sg, playSound);
                     updateWidget(last.optString("sg", "--"), trendArrow, timeSince.trim(), statusText, sg, readingTs);
                 }
+                evaluateNativeAlarms(sg, readingTs, sensorConnected && hasValidReading);
 
             } catch (Exception e) {
                 Log.e("BackgroundPlugin", "Error in getData()", e);
@@ -1991,25 +2098,54 @@ public class BackgroundPlugin extends Plugin {
     private int inferCarelinkOffsetMin(JSONObject data) {
         int device = deviceUtcOffsetMin();
         if (data == null) return device;
-        long server = firstPositiveMs(data,
-                "lastConduitUpdateServerDateTime",
-                "lastConduitUpdateServerTime",
-                "lastMedicalDeviceDataUpdateServerTime",
-                "currentServerTime");
-        String clock = firstClockString(data,
-                "lastConduitDateTime",
-                "sMedicalDeviceTime",
-                "medicalDeviceTimeAsString");
-        if (clock != null && server > 0) {
-            long wallUtc = parseWallAsUtc(stripCarelinkTz(clock));
-            if (wallUtc > 0) {
-                long rounded = Math.round((wallUtc - server) / 60000.0 / 15.0) * 15;
-                if (Math.abs(rounded) <= 14L * 60L) {
-                    return (int) rounded;
-                }
-            }
+        Integer named = namedTimeZoneOffsetMin(
+                data.optString("clientTimeZoneName", ""),
+                System.currentTimeMillis());
+        Integer inferred = inferredOffsetMin(data);
+        int dstAnchor = named != null ? named : device;
+        if (inferred != null && Math.abs(inferred - dstAnchor) == 60) {
+            return dstAnchor;
         }
+        if (inferred != null) return inferred;
+        if (named != null) return named;
         return device;
+    }
+
+    private Integer inferredOffsetMin(JSONObject data) {
+        long deviceServer = firstPositiveMs(data, "lastMedicalDeviceDataUpdateServerTime");
+        String deviceClock = firstClockString(data, "sMedicalDeviceTime", "medicalDeviceTimeAsString");
+        if (deviceClock != null && deviceServer > 0) {
+            Integer v = offsetFromClockAndServer(deviceClock, deviceServer);
+            if (v != null) return v;
+        }
+        long conduitServer = firstPositiveMs(data,
+                "lastConduitUpdateServerDateTime",
+                "lastConduitUpdateServerTime");
+        String conduitClock = firstClockString(data, "lastConduitDateTime");
+        if (conduitClock != null && conduitServer > 0) {
+            return offsetFromClockAndServer(conduitClock, conduitServer);
+        }
+        return null;
+    }
+
+    private Integer offsetFromClockAndServer(String clock, long server) {
+        long wallUtc = parseWallAsUtc(stripCarelinkTz(clock));
+        if (wallUtc <= 0) return null;
+        long rounded = Math.round((wallUtc - server) / 60000.0 / 15.0) * 15;
+        if (Math.abs(rounded) <= 14L * 60L) return (int) rounded;
+        return null;
+    }
+
+    private Integer namedTimeZoneOffsetMin(String name, long atMs) {
+        if (name == null || name.isEmpty()) return null;
+        TimeZone tz = TimeZone.getTimeZone(name);
+        if ("GMT".equals(tz.getID())
+                && !"GMT".equalsIgnoreCase(name)
+                && !name.startsWith("GMT")
+                && !name.startsWith("Etc/GMT")) {
+            return null;
+        }
+        return tz.getOffset(atMs) / 60000;
     }
 
     private long firstPositiveMs(JSONObject data, String... keys) {

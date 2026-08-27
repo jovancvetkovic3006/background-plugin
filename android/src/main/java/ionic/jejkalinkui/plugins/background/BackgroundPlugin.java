@@ -1604,6 +1604,7 @@ public class BackgroundPlugin extends Plugin {
                 "ionic.jejkalinkui.GlucoseWidgetProvider",
                 "ionic.jejkalinkui.GlucoseWidgetCompactProvider",
                 "ionic.jejkalinkui.GlucoseWidgetChartProvider",
+                "ionic.jejkalinkui.GlucoseWidgetDayMetricsProvider",
         };
         for (String name : providers) {
             try {
@@ -1616,7 +1617,7 @@ public class BackgroundPlugin extends Plugin {
         }
     }
 
-    /** Store last-3h mmol points for the chart widget sparkline (oldest → newest). */
+    /** Store today's (local midnight → now) mmol points for the Day-chart widget. */
     private void saveSparklineFromSgs(JSONArray sgs) {
         saveSparklineFromSgs(
                 sgs,
@@ -1628,38 +1629,139 @@ public class BackgroundPlugin extends Plugin {
         try {
             Context context = ctx();
             if (context == null || sgs == null) return;
-            long cutoff = System.currentTimeMillis() - 3L * 60L * 60L * 1000L;
-            java.util.ArrayList<String> pts = new java.util.ArrayList<>();
-            for (int i = sgs.length() - 1; i >= 0; i--) {
+            Calendar cal = Calendar.getInstance();
+            cal.set(Calendar.HOUR_OF_DAY, 0);
+            cal.set(Calendar.MINUTE, 0);
+            cal.set(Calendar.SECOND, 0);
+            cal.set(Calendar.MILLISECOND, 0);
+            long dayStart = cal.getTimeInMillis();
+            long now = System.currentTimeMillis();
+
+            java.util.ArrayList<long[]> rows = new java.util.ArrayList<>();
+            for (int i = 0; i < sgs.length(); i++) {
                 JSONObject sg = sgs.optJSONObject(i);
                 if (sg == null) continue;
                 int mg = sg.optInt("sg", 0);
                 if (mg <= 0) continue;
                 long ts = readingTsMillis(sg, offsetMin);
-                if (ts > 0 && ts < cutoff) continue;
+                if (ts < dayStart || ts > now) continue;
                 if (ts > serverCutoff) continue;
-                double mmol = mg / 18.0182;
-                pts.add(String.format(Locale.US, "%.1f", mmol));
+                long mmolX10 = Math.round(mg / 18.0182 * 10.0);
+                rows.add(new long[] { ts, mmolX10 });
             }
-            // Cap density for the tiny bitmap
-            while (pts.size() > 48) {
-                java.util.ArrayList<String> down = new java.util.ArrayList<>();
-                for (int i = 0; i < pts.size(); i += 2) {
-                    down.add(pts.get(i));
+            rows.sort((a, b) -> Long.compare(a[0], b[0]));
+
+            float[] metrics = dayMetricsFromRows(rows);
+            long gapTh = 10L * 60L * 1000L;
+            long period = Math.max(1L, now - dayStart);
+            long gapSum = 0;
+            if (rows.isEmpty()) {
+                gapSum = period;
+            } else {
+                if (rows.get(0)[0] - dayStart > gapTh) gapSum += rows.get(0)[0] - dayStart;
+                for (int i = 0; i < rows.size() - 1; i++) {
+                    long d = rows.get(i + 1)[0] - rows.get(i)[0];
+                    if (d > gapTh) gapSum += d;
                 }
-                if (pts.size() % 2 == 1) {
-                    down.add(pts.get(pts.size() - 1));
-                }
-                pts = down;
+                long lastT = rows.get(rows.size() - 1)[0];
+                if (now - lastT > gapTh) gapSum += now - lastT;
             }
-            String csv = android.text.TextUtils.join(",", pts);
-            context.getSharedPreferences("glucose_widget_prefs", Context.MODE_PRIVATE)
-                    .edit()
-                    .putString("sparkline_points", csv)
-                    .apply();
+            float coveragePct = Math.round((period - gapSum) / (float) period * 1000f) / 10f;
+
+            while (rows.size() > 144) {
+                java.util.ArrayList<long[]> down = new java.util.ArrayList<>();
+                for (int i = 0; i < rows.size(); i += 2) {
+                    down.add(rows.get(i));
+                }
+                if (!down.isEmpty() && down.get(down.size() - 1) != rows.get(rows.size() - 1)) {
+                    down.add(rows.get(rows.size() - 1));
+                }
+                rows = down;
+            }
+
+            StringBuilder csv = new StringBuilder();
+            for (int i = 0; i < rows.size(); i++) {
+                if (i > 0) csv.append(';');
+                csv.append(rows.get(i)[0]).append(',').append(rows.get(i)[1] / 10.0);
+            }
+
+            String label = "";
+            if (!rows.isEmpty()) {
+                long[] last = rows.get(rows.size() - 1);
+                SimpleDateFormat hhmm = new SimpleDateFormat("HH:mm", Locale.UK);
+                hhmm.setTimeZone(TimeZone.getDefault());
+                label = hhmm.format(new Date(last[0]))
+                        + " · "
+                        + String.format(Locale.US, "%.1f", last[1] / 10.0)
+                        + " mmol/L";
+            }
+
+            android.content.SharedPreferences.Editor ed =
+                    context.getSharedPreferences("glucose_widget_prefs", Context.MODE_PRIVATE).edit();
+            ed.putString("sparkline_points", csv.toString());
+            ed.putLong("sparkline_day_start_ms", dayStart);
+            ed.putLong("sparkline_day_end_ms", now);
+            ed.putString("sparkline_label", label);
+            ed.putString("day_tir", formatPct(metrics[0]));
+            ed.putString("day_mean", String.format(Locale.US, "%.1f", metrics[1]));
+            ed.putString("day_below", formatPct(metrics[2]));
+            ed.putString("day_above", formatPct(metrics[3]));
+            ed.putString("day_very_low", formatPct(metrics[4]));
+            ed.putString("day_very_high", formatPct(metrics[5]));
+            ed.putString("day_coverage", formatPct(coveragePct));
+            ed.apply();
         } catch (Exception e) {
             Log.e("BackgroundPlugin", "saveSparklineFromSgs failed", e);
         }
+    }
+
+    /** tir, mean, below, above, veryLow, veryHigh, coveragePct — all one decimal. */
+    private static float[] dayMetricsFromRows(java.util.ArrayList<long[]> rows) {
+        float[] empty = { 0, 0, 0, 0, 0, 0 };
+        if (rows == null || rows.isEmpty()) return empty;
+        final long gapMs = 10L * 60L * 1000L;
+        final long spanMs = 5L * 60L * 1000L;
+        final float low = 3.9f;
+        final float high = 10.0f;
+        final float veryLow = 3.0f;
+        final float veryHigh = 13.9f;
+        double sum = 0;
+        long covered = 0;
+        long tir = 0;
+        long below = 0;
+        long above = 0;
+        long vl = 0;
+        long vh = 0;
+        for (int i = 0; i < rows.size(); i++) {
+            float mmol = rows.get(i)[1] / 10f;
+            sum += mmol;
+            long dt = spanMs;
+            if (i < rows.size() - 1) {
+                long delta = rows.get(i + 1)[0] - rows.get(i)[0];
+                if (delta > 0) dt = Math.min(delta, gapMs);
+            }
+            covered += dt;
+            if (mmol >= low && mmol <= high) tir += dt;
+            if (mmol < low) below += dt;
+            if (mmol > high) above += dt;
+            if (mmol < veryLow) vl += dt;
+            if (mmol > veryHigh) vh += dt;
+        }
+        float n = rows.size();
+        float cov = covered > 0 ? (float) covered : 1f;
+        return new float[] {
+            Math.round(tir / cov * 1000f) / 10f,
+            Math.round(sum / n * 10f) / 10f,
+            Math.round(below / cov * 1000f) / 10f,
+            Math.round(above / cov * 1000f) / 10f,
+            Math.round(vl / cov * 1000f) / 10f,
+            Math.round(vh / cov * 1000f) / 10f
+        };
+    }
+
+    private static String formatPct(float v) {
+        if (v == (long) v) return String.format(Locale.US, "%.0f", v);
+        return String.format(Locale.US, "%.1f", v);
     }
 
     /** Keep last real glucose on screen when CareLink has no fresh in-range reading. */

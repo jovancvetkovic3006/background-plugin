@@ -1600,6 +1600,7 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void notifyAllGlucoseWidgets(Context context) {
+        android.appwidget.AppWidgetManager mgr = android.appwidget.AppWidgetManager.getInstance(context);
         String[] providers = {
                 "ionic.jejkalinkui.GlucoseWidgetProvider",
                 "ionic.jejkalinkui.GlucoseWidgetCompactProvider",
@@ -1608,9 +1609,19 @@ public class BackgroundPlugin extends Plugin {
         };
         for (String name : providers) {
             try {
-                Intent intent = new Intent("ionic.jejkalinkui.UPDATE_GLUCOSE_WIDGET");
-                intent.setComponent(new android.content.ComponentName(context, name));
-                context.sendBroadcast(intent);
+                android.content.ComponentName cn = new android.content.ComponentName(context, name);
+                int[] ids = mgr.getAppWidgetIds(cn);
+                Intent update = new Intent(android.appwidget.AppWidgetManager.ACTION_APPWIDGET_UPDATE);
+                update.setComponent(cn);
+                update.setPackage(context.getPackageName());
+                update.putExtra(android.appwidget.AppWidgetManager.EXTRA_APPWIDGET_IDS,
+                        ids != null ? ids : new int[0]);
+                context.sendBroadcast(update);
+
+                Intent custom = new Intent("ionic.jejkalinkui.UPDATE_GLUCOSE_WIDGET");
+                custom.setComponent(cn);
+                custom.setPackage(context.getPackageName());
+                context.sendBroadcast(custom);
             } catch (Exception e) {
                 Log.e("BackgroundPlugin", "Widget notify failed for " + name, e);
             }
@@ -1700,7 +1711,8 @@ public class BackgroundPlugin extends Plugin {
                     context.getSharedPreferences("glucose_widget_prefs", Context.MODE_PRIVATE).edit();
             ed.putString("sparkline_points", csv.toString());
             ed.putLong("sparkline_day_start_ms", dayStart);
-            ed.putLong("sparkline_day_end_ms", now);
+            ed.putLong("sparkline_plot_end_ms", now);
+            ed.putLong("sparkline_day_end_ms", dayStart + 24L * 60L * 60L * 1000L - 1L);
             ed.putString("sparkline_label", label);
             ed.putString("day_tir", formatPct(metrics[0]));
             ed.putString("day_mean", String.format(Locale.US, "%.1f", metrics[1]));
@@ -1709,7 +1721,8 @@ public class BackgroundPlugin extends Plugin {
             ed.putString("day_very_low", formatPct(metrics[4]));
             ed.putString("day_very_high", formatPct(metrics[5]));
             ed.putString("day_coverage", formatPct(coveragePct));
-            ed.apply();
+            ed.commit();
+            notifyAllGlucoseWidgets(context);
         } catch (Exception e) {
             Log.e("BackgroundPlugin", "saveSparklineFromSgs failed", e);
         }

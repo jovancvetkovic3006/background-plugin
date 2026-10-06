@@ -168,6 +168,8 @@ public class ForegroundService extends Service {
                 .setContentText("Monitoring glucose…")
                 .setSmallIcon(iconId)
                 .setOngoing(true)
+                .setRequestPromotedOngoing(true)
+                .setShortCriticalText("LIVE")
                 .setOnlyAlertOnce(true)
                 .setContentIntent(pending)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)

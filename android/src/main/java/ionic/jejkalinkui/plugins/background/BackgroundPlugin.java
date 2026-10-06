@@ -16,6 +16,7 @@ import android.os.Build;
 import android.content.Context;
 
 import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
 
 import android.app.Activity;
 import android.app.PendingIntent;
@@ -778,7 +779,8 @@ public class BackgroundPlugin extends Plugin {
                 playSound);
     }
 
-    /** Classic ongoing glucose notification (title + body + colored large icon). */
+    /** Classic ongoing glucose notification (title + body + colored large icon).
+     * Requests Android 16+ Live Update promotion so the same id stays as a status-bar chip. */
     private void showLiveGlucoseNotification(String glucose, String trendArrow, String age, String status,
             String details, double sgValue, boolean playSound) {
         try {
@@ -832,6 +834,12 @@ public class BackgroundPlugin extends Plugin {
                 body = statusText.isEmpty() ? detailsText : statusText + "\n" + detailsText;
             }
 
+            // Status-bar chip text is short (~7 chars). Prefer glucose value when available.
+            String chipText = valueText;
+            if (chipText.length() > 7) {
+                chipText = chipText.substring(0, 7);
+            }
+
             NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
                     .setContentTitle(title)
                     .setContentText(body)
@@ -839,6 +847,8 @@ public class BackgroundPlugin extends Plugin {
                     .setLargeIcon(createGlucoseIcon(sgValue))
                     .setAutoCancel(false)
                     .setOngoing(true)
+                    .setRequestPromotedOngoing(true)
+                    .setShortCriticalText(chipText)
                     .setOnlyAlertOnce(!playSound)
                     .setContentIntent(pendingIntent)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -853,7 +863,9 @@ public class BackgroundPlugin extends Plugin {
             }
 
             notificationManager.notify(NOTIFICATION_ID, builder.build());
-            this.doLogg("showNotification: notified OK");
+            this.doLogg("showNotification: notified OK requestPromoted=true canPromote="
+                    + NotificationManagerCompat.from(context).canPostPromotedNotifications()
+                    + " api=" + Build.VERSION.SDK_INT);
 
             boolean bridgeAlive = pluginRef != null && pluginRef.get() != null;
             if (!bridgeAlive && sgValue > 0 && sgValue < alarmLow) {

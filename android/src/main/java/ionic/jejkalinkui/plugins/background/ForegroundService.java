@@ -171,9 +171,14 @@ public class ForegroundService extends Service {
                 .setRequestPromotedOngoing(true)
                 .setShortCriticalText("LIVE")
                 .setOnlyAlertOnce(true)
+                .setShowWhen(false)
                 .setContentIntent(pending)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setCategory(NotificationCompat.CATEGORY_STATUS)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setStyle(new NotificationCompat.BigTextStyle()
+                        .bigText("Monitoring glucose…")
+                        .setBigContentTitle("JejkaLink"))
                 .build();
     }
 }

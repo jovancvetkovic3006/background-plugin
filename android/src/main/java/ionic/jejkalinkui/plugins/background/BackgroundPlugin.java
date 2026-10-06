@@ -17,14 +17,11 @@ import android.content.Context;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
+import androidx.core.graphics.drawable.IconCompat;
 
 import android.app.Activity;
 import android.app.PendingIntent;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Paint;
 import android.graphics.Color;
-import android.graphics.Typeface;
 
 import android.util.Log;
 import android.provider.Settings;
@@ -585,29 +582,6 @@ public class BackgroundPlugin extends Plugin {
         }
     }
 
-    private Bitmap createGlucoseIcon(double sgValue) {
-        int size = 128;
-        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-
-        // Background circle color based on glucose level
-        Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        bgPaint.setColor(rangeAccentColor(sgValue));
-        canvas.drawCircle(size / 2f, size / 2f, size / 2f, bgPaint);
-
-        // Glucose text
-        Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        textPaint.setColor(Color.WHITE);
-        textPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-        textPaint.setTextAlign(Paint.Align.CENTER);
-        String text = String.format(java.util.Locale.US, "%.1f", sgValue);
-        textPaint.setTextSize(text.length() > 3 ? 38f : 44f);
-        float yPos = (size / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f);
-        canvas.drawText(text, size / 2f, yPos, textPaint);
-
-        return bitmap;
-    }
-
     private String getTrendArrow(JSONObject json) {
         try {
             String trend = json.optString("lastSGTrend", "");
@@ -779,8 +753,10 @@ public class BackgroundPlugin extends Plugin {
                 playSound);
     }
 
-    /** Classic ongoing glucose notification (title + body + colored large icon).
-     * Requests Android 16+ Live Update promotion so the same id stays as a status-bar chip. */
+    /**
+     * Ongoing glucose Live Update (Android 16+ ProgressStyle chip) with sticky fallback.
+     * Avoids custom large-icon bitmaps — those crush padding in the system template.
+     */
     private void showLiveGlucoseNotification(String glucose, String trendArrow, String age, String status,
             String details, double sgValue, boolean playSound) {
         try {
@@ -826,45 +802,54 @@ public class BackgroundPlugin extends Plugin {
             }
             String detailsText = details != null ? details.trim() : "";
 
-            String title = valueText + " mmol/L"
-                    + (trendText.isEmpty() ? "" : " " + trendText)
-                    + "  \u00b7  " + ageText;
+            // Keep title short so the system template has room (no dense "value · age" mash).
+            String title = valueText + " mmol/L" + (trendText.isEmpty() ? "" : " " + trendText);
             String body = statusText;
+            if (!ageText.isEmpty() && !"--".equals(ageText)) {
+                body = statusText.isEmpty() ? ageText : statusText + " \u00b7 " + ageText;
+            }
             if (!detailsText.isEmpty()) {
-                body = statusText.isEmpty() ? detailsText : statusText + "\n" + detailsText;
+                body = body.isEmpty() ? detailsText : body + "\n" + detailsText;
             }
 
-            // Status-bar chip text is short (~7 chars). Prefer glucose value when available.
+            // Status-bar chip text is short (~7 chars).
             String chipText = valueText;
             if (chipText.length() > 7) {
                 chipText = chipText.substring(0, 7);
             }
 
+            int iconId = getNotificationIcon(context);
             NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
                     .setContentTitle(title)
                     .setContentText(body)
-                    .setSmallIcon(getNotificationIcon(context))
-                    .setLargeIcon(createGlucoseIcon(sgValue))
+                    .setSmallIcon(iconId)
                     .setAutoCancel(false)
                     .setOngoing(true)
                     .setRequestPromotedOngoing(true)
                     .setShortCriticalText(chipText)
                     .setOnlyAlertOnce(!playSound)
+                    .setShowWhen(false)
                     .setContentIntent(pendingIntent)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setCategory(NotificationCompat.CATEGORY_STATUS)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setColor(accentColor)
+                    .setStyle(buildGlucoseProgressStyle(context, sgValue, iconId))
                     .addAction(android.R.drawable.ic_popup_sync, "Refresh", refreshPending);
 
-            if (body != null && !body.isEmpty()) {
-                builder.setStyle(new NotificationCompat.BigTextStyle()
-                        .bigText(body)
-                        .setBigContentTitle(title));
-            }
+            Notification notification = builder.build();
+            notificationManager.notify(NOTIFICATION_ID, notification);
 
-            notificationManager.notify(NOTIFICATION_ID, builder.build());
-            this.doLogg("showNotification: notified OK requestPromoted=true canPromote="
-                    + NotificationManagerCompat.from(context).canPostPromotedNotifications()
+            boolean canPromote = NotificationManagerCompat.from(context).canPostPromotedNotifications();
+            boolean promotable = false;
+            if (Build.VERSION.SDK_INT >= 36) {
+                try {
+                    promotable = notification.hasPromotableCharacteristics();
+                } catch (Throwable ignored) {
+                }
+            }
+            this.doLogg("showNotification: notified OK canPromote=" + canPromote
+                    + " promotable=" + promotable
                     + " api=" + Build.VERSION.SDK_INT);
 
             boolean bridgeAlive = pluginRef != null && pluginRef.get() != null;
@@ -876,6 +861,42 @@ public class BackgroundPlugin extends Plugin {
             this.doLogg("showNotification CRASHED: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+    /**
+     * Clinical-range ProgressStyle for Android 16 Live Updates.
+     * Scale is mmol/L × 10 from 2.0 → 16.0; segments match Very low / Low / In range / High / Very high.
+     */
+    private NotificationCompat.ProgressStyle buildGlucoseProgressStyle(Context context, double sgValue,
+            int iconId) {
+        final int scaleMin = 20; // 2.0 mmol/L
+        final int scaleMax = 160; // 16.0 mmol/L
+        int progress = 0;
+        if (sgValue > 0) {
+            int scaled = (int) Math.round(sgValue * 10.0);
+            if (scaled < scaleMin) scaled = scaleMin;
+            if (scaled > scaleMax) scaled = scaleMax;
+            progress = scaled - scaleMin;
+        }
+
+        NotificationCompat.ProgressStyle style = new NotificationCompat.ProgressStyle()
+                .setStyledByProgress(false)
+                .setProgress(progress)
+                .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(10)
+                        .setColor(Color.parseColor("#C2255C"))) // 2.0–3.0 very low
+                .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(9)
+                        .setColor(Color.parseColor("#E8590C"))) // 3.0–3.9 low
+                .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(61)
+                        .setColor(Color.parseColor("#2F9E44"))) // 3.9–10.0 in range
+                .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(39)
+                        .setColor(Color.parseColor("#E8590C"))) // 10.0–13.9 high
+                .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(21)
+                        .setColor(Color.parseColor("#C2255C"))); // 13.9–16.0 very high
+
+        if (iconId != 0) {
+            style.setProgressTrackerIcon(IconCompat.createWithResource(context, iconId));
+        }
+        return style;
     }
 
     /** Clinical range colors (tokens), not alarm thresholds. */

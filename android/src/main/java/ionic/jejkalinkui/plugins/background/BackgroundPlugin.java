@@ -855,14 +855,14 @@ public class BackgroundPlugin extends Plugin {
             }
 
             int badgeColor = liveAlertColor != 0 ? liveAlertColor : rangeAccentColor(sgValue);
-            boolean showAlertMark = liveAlertTitle != null && !liveAlertTitle.isEmpty();
+            boolean hasAlert = liveAlertTitle != null && !liveAlertTitle.isEmpty();
             int iconId = getNotificationIcon(context);
 
             NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
                     .setContentTitle(title)
                     .setContentText(body)
                     .setSmallIcon(iconId)
-                    .setLargeIcon(createStatusBadgeIcon(badgeColor, showAlertMark))
+                    .setLargeIcon(createStatusBadgeIcon(badgeColor, liveAlertRule, hasAlert, sgValue))
                     .setAutoCancel(false)
                     .setOngoing(true)
                     .setRequestPromotedOngoing(true)
@@ -871,7 +871,7 @@ public class BackgroundPlugin extends Plugin {
                     .setShowWhen(false)
                     .setContentIntent(pendingIntent)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setCategory(criticalSound || showAlertMark
+                    .setCategory(criticalSound || hasAlert
                             ? NotificationCompat.CATEGORY_ALARM
                             : NotificationCompat.CATEGORY_STATUS)
                     .setPriority(criticalSound
@@ -930,7 +930,9 @@ public class BackgroundPlugin extends Plugin {
         nm.cancel(STATUS_NOTIFICATION_ID + 1);
         String[] rules = {
                 "urgent_low", "low", "high", "stale", "status", "collector_failure", "alarm",
-                "collector_failure", liveAlertRule
+                "falling_fast", "projection", "sensor_disconnected", "pump_disconnected",
+                "session", "status_reservoir", "status_sensor", "status_battery",
+                "status_pump_battery", "status_sensor_battery", liveAlertRule
         };
         for (String rule : rules) {
             if (rule == null || rule.isEmpty()) {
@@ -940,10 +942,13 @@ public class BackgroundPlugin extends Plugin {
         }
     }
 
-    /** Right-side badge: solid circle with extra right inset to mirror the left app-icon gutter. */
-    private Bitmap createStatusBadgeIcon(int color, boolean alertMark) {
+    private enum BadgeGlyph {
+        CHECK, ARROW_UP, ARROW_DOWN, ARROW_DOUBLE_DOWN, DISCONNECT, CLOCK, BATTERY, WARN, CLOUD_OFF
+    }
+
+    /** Right-side badge: colored disc + glyph for alert type (or check when calm). */
+    private Bitmap createStatusBadgeIcon(int color, String rule, boolean hasAlert, double sgValue) {
         int size = 128;
-        // Larger disc, still shifted left so the right gutter matches the small-icon left margin.
         float pad = size * 0.06f;
         float extraRight = size * 0.12f;
         float radius = (size / 2f) - pad - (extraRight / 2f);
@@ -957,16 +962,138 @@ public class BackgroundPlugin extends Plugin {
         Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
         bg.setColor(color);
         canvas.drawCircle(cx, cy, radius, bg);
-        if (alertMark) {
-            Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
-            text.setColor(Color.WHITE);
-            text.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            text.setTextAlign(Paint.Align.CENTER);
-            text.setTextSize(radius * 1.15f);
-            float y = cy - ((text.descent() + text.ascent()) / 2f);
-            canvas.drawText("!", cx, y, text);
-        }
+
+        BadgeGlyph glyph = badgeGlyphFor(rule, hasAlert, sgValue);
+        Paint fg = new Paint(Paint.ANTI_ALIAS_FLAG);
+        fg.setColor(Color.WHITE);
+        fg.setStyle(Paint.Style.STROKE);
+        fg.setStrokeCap(Paint.Cap.ROUND);
+        fg.setStrokeJoin(Paint.Join.ROUND);
+        fg.setStrokeWidth(Math.max(4f, radius * 0.16f));
+        drawBadgeGlyph(canvas, glyph, cx, cy, radius * 0.55f, fg);
         return bitmap;
+    }
+
+    private BadgeGlyph badgeGlyphFor(String rule, boolean hasAlert, double sgValue) {
+        if (!hasAlert || rule == null || rule.isEmpty()) {
+            if (sgValue > 0 && sgValue < 3.9) return BadgeGlyph.ARROW_DOWN;
+            if (sgValue > 10.0) return BadgeGlyph.ARROW_UP;
+            return BadgeGlyph.CHECK;
+        }
+        switch (rule) {
+            case "urgent_low":
+                return BadgeGlyph.ARROW_DOUBLE_DOWN;
+            case "low":
+                return BadgeGlyph.ARROW_DOWN;
+            case "high":
+                return BadgeGlyph.ARROW_UP;
+            case "falling_fast":
+            case "projection":
+                return BadgeGlyph.ARROW_DOUBLE_DOWN;
+            case "sensor_disconnected":
+            case "pump_disconnected":
+                return BadgeGlyph.DISCONNECT;
+            case "stale":
+                return BadgeGlyph.CLOCK;
+            case "collector_failure":
+            case "session":
+                return BadgeGlyph.CLOUD_OFF;
+            case "status_battery":
+            case "status_pump_battery":
+            case "status_sensor_battery":
+                return BadgeGlyph.BATTERY;
+            case "status_reservoir":
+            case "status_sensor":
+            case "status":
+                return BadgeGlyph.WARN;
+            default:
+                return BadgeGlyph.WARN;
+        }
+    }
+
+    private void drawBadgeGlyph(Canvas canvas, BadgeGlyph glyph, float cx, float cy, float s, Paint stroke) {
+        Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        fill.setColor(stroke.getColor());
+        fill.setStyle(Paint.Style.FILL);
+        android.graphics.Path path = new android.graphics.Path();
+        switch (glyph) {
+            case CHECK: {
+                path.moveTo(cx - s * 0.55f, cy);
+                path.lineTo(cx - s * 0.1f, cy + s * 0.45f);
+                path.lineTo(cx + s * 0.6f, cy - s * 0.45f);
+                canvas.drawPath(path, stroke);
+                break;
+            }
+            case ARROW_UP: {
+                path.moveTo(cx, cy - s * 0.65f);
+                path.lineTo(cx - s * 0.5f, cy + s * 0.05f);
+                path.lineTo(cx + s * 0.5f, cy + s * 0.05f);
+                path.close();
+                canvas.drawPath(path, fill);
+                canvas.drawLine(cx, cy - s * 0.15f, cx, cy + s * 0.6f, stroke);
+                break;
+            }
+            case ARROW_DOWN: {
+                path.moveTo(cx, cy + s * 0.65f);
+                path.lineTo(cx - s * 0.5f, cy - s * 0.05f);
+                path.lineTo(cx + s * 0.5f, cy - s * 0.05f);
+                path.close();
+                canvas.drawPath(path, fill);
+                canvas.drawLine(cx, cy + s * 0.15f, cx, cy - s * 0.6f, stroke);
+                break;
+            }
+            case ARROW_DOUBLE_DOWN: {
+                // Two stacked chevrons for urgent / falling fast.
+                for (float dy : new float[] { -s * 0.25f, s * 0.3f }) {
+                    android.graphics.Path chev = new android.graphics.Path();
+                    chev.moveTo(cx - s * 0.55f, cy + dy - s * 0.2f);
+                    chev.lineTo(cx, cy + dy + s * 0.25f);
+                    chev.lineTo(cx + s * 0.55f, cy + dy - s * 0.2f);
+                    canvas.drawPath(chev, stroke);
+                }
+                break;
+            }
+            case DISCONNECT: {
+                // Two link halves with a gap (sensor/pump disconnected).
+                canvas.drawCircle(cx - s * 0.35f, cy, s * 0.28f, stroke);
+                canvas.drawCircle(cx + s * 0.35f, cy, s * 0.28f, stroke);
+                canvas.drawLine(cx - s * 0.1f, cy - s * 0.45f, cx + s * 0.1f, cy + s * 0.45f, stroke);
+                break;
+            }
+            case CLOCK: {
+                canvas.drawCircle(cx, cy, s * 0.7f, stroke);
+                canvas.drawLine(cx, cy, cx, cy - s * 0.4f, stroke);
+                canvas.drawLine(cx, cy, cx + s * 0.35f, cy + s * 0.15f, stroke);
+                break;
+            }
+            case BATTERY: {
+                float left = cx - s * 0.45f;
+                float top = cy - s * 0.35f;
+                float w = s * 0.75f;
+                float h = s * 0.7f;
+                canvas.drawRoundRect(left, top, left + w, top + h, s * 0.08f, s * 0.08f, stroke);
+                canvas.drawRect(left + w, cy - s * 0.15f, left + w + s * 0.15f, cy + s * 0.15f, fill);
+                break;
+            }
+            case CLOUD_OFF: {
+                canvas.drawCircle(cx - s * 0.2f, cy + s * 0.05f, s * 0.35f, stroke);
+                canvas.drawCircle(cx + s * 0.25f, cy, s * 0.3f, stroke);
+                canvas.drawLine(cx - s * 0.55f, cy + s * 0.55f, cx + s * 0.55f, cy - s * 0.55f, stroke);
+                break;
+            }
+            case WARN:
+            default: {
+                path.moveTo(cx, cy - s * 0.7f);
+                path.lineTo(cx - s * 0.65f, cy + s * 0.55f);
+                path.lineTo(cx + s * 0.65f, cy + s * 0.55f);
+                path.close();
+                canvas.drawPath(path, stroke);
+                Paint dot = new Paint(fill);
+                canvas.drawCircle(cx, cy + s * 0.28f, s * 0.1f, dot);
+                canvas.drawLine(cx, cy - s * 0.25f, cx, cy + s * 0.05f, stroke);
+                break;
+            }
+        }
     }
 
     /**
@@ -1052,13 +1179,34 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private int alertColorForRule(String rule, boolean critical) {
-        if (critical || "urgent_low".equals(rule)) {
-            return Color.parseColor("#9B1B47");
+        if (rule == null) {
+            return critical ? Color.parseColor("#9B1B47") : Color.parseColor("#C77C1E");
         }
-        if ("low".equals(rule) || "high".equals(rule) || "stale".equals(rule)) {
-            return Color.parseColor("#C2255C");
+        switch (rule) {
+            case "urgent_low":
+                return Color.parseColor("#9B1B47"); // dark red
+            case "high":
+                return Color.parseColor("#C2255C"); // red
+            case "low":
+            case "falling_fast":
+            case "projection":
+                return Color.parseColor("#E8590C"); // orange
+            case "stale":
+            case "sensor_disconnected":
+            case "pump_disconnected":
+            case "collector_failure":
+            case "session":
+                return Color.parseColor("#6C757D"); // slate
+            case "status_battery":
+            case "status_pump_battery":
+            case "status_sensor_battery":
+            case "status_reservoir":
+            case "status_sensor":
+            case "status":
+                return Color.parseColor("#C77C1E"); // amber
+            default:
+                return critical ? Color.parseColor("#9B1B47") : Color.parseColor("#C77C1E");
         }
-        return Color.parseColor("#C77C1E"); // status / collector / other
     }
 
     /**
@@ -1253,13 +1401,20 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void showStatusAlert(String body) {
-        pushIntoLiveNotification(
-                "status",
-                "Status alert",
-                body,
-                Color.parseColor("#C77C1E"),
-                false,
-                true);
+        String rule = "status";
+        String lower = body != null ? body.toLowerCase(Locale.US) : "";
+        if (lower.contains("reservoir")) {
+            rule = "status_reservoir";
+        } else if (lower.contains("sensor expires") || lower.contains("sensor expire")) {
+            rule = "status_sensor";
+        } else if (lower.contains("pump battery")) {
+            rule = "status_pump_battery";
+        } else if (lower.contains("sensor battery")) {
+            rule = "status_sensor_battery";
+        } else if (lower.contains("battery")) {
+            rule = "status_battery";
+        }
+        pushIntoLiveNotification(rule, "Status alert", body, alertColorForRule(rule, false), false, true);
     }
 
     @PluginMethod
@@ -1627,7 +1782,13 @@ public class BackgroundPlugin extends Plugin {
                 error.put("message", response.toString().substring(0, Math.min(200, response.length())));
                 safeNotify("onTokenRefreshFailed", error);
 
-                showNotification("Session expired", "Open the app to sign in again", 0, false);
+                pushIntoLiveNotification(
+                        "session",
+                        "Session expired",
+                        "Open the app to sign in again",
+                        alertColorForRule("session", false),
+                        false,
+                        true);
                 updateWidget("--", "", "Session expired", "", 0);
                 return false;
             }
@@ -1849,6 +2010,23 @@ public class BackgroundPlugin extends Plugin {
     /** Keep last real glucose on screen when CareLink has no fresh in-range reading. */
     private void showStaleOrDisconnected(String reason) {
         Context context = ctx();
+        String rule = "stale";
+        if (reason != null) {
+            String lower = reason.toLowerCase(Locale.US);
+            if (lower.contains("pump")) {
+                rule = "pump_disconnected";
+            } else if (lower.contains("sensor")) {
+                rule = "sensor_disconnected";
+            } else if (lower.contains("no fresh") || lower.contains("no data")) {
+                rule = "stale";
+            }
+        }
+        liveAlertRule = rule;
+        liveAlertTitle = reason;
+        liveAlertBody = null;
+        liveAlertColor = alertColorForRule(rule, false);
+        liveAlertCritical = false;
+
         if (context == null) {
             showNotification(reason, "", 0, false);
             return;

@@ -17,11 +17,14 @@ import android.content.Context;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
-import androidx.core.graphics.drawable.IconCompat;
 
 import android.app.Activity;
 import android.app.PendingIntent;
+import android.graphics.Bitmap;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Typeface;
 
 import android.util.Log;
 import android.provider.Settings;
@@ -135,6 +138,21 @@ public class BackgroundPlugin extends Plugin {
     private static boolean alertedSensorExpiring = false;
     private static boolean alertedPumpBatteryLow = false;
     private static boolean alertedSensorBatteryLow = false;
+
+    // Last glucose snapshot so alerts can refresh the single live notification.
+    private static String lastGlucose = "--";
+    private static String lastTrend = "";
+    private static String lastAge = "";
+    private static String lastStatus = "";
+    private static String lastDetails = "";
+    private static double lastSg = 0;
+
+    // Active banner folded into the live notification (null = calm).
+    private static String liveAlertTitle = null;
+    private static String liveAlertBody = null;
+    private static int liveAlertColor = 0;
+    private static boolean liveAlertCritical = false;
+    private static String liveAlertRule = null;
 
     @Override
     public void load() {
@@ -529,27 +547,13 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void fireCollectorFailureAlert(int failures) {
-        try {
-            Context context = ctx();
-            if (context == null) {
-                return;
-            }
-            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-            Intent intent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-            PendingIntent pending = PendingIntent.getActivity(
-                    context, 0, intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ALERT)
-                    .setContentTitle("Collector failing")
-                    .setContentText(failures + " consecutive CareLink failures. Open the app to check session.")
-                    .setSmallIcon(getNotificationIcon(context))
-                    .setAutoCancel(true)
-                    .setContentIntent(pending)
-                    .setPriority(NotificationCompat.PRIORITY_HIGH);
-            nm.notify(STATUS_NOTIFICATION_ID + 1, builder.build());
-        } catch (Exception e) {
-            Log.e("BackgroundPlugin", "fireCollectorFailureAlert failed", e);
-        }
+        pushIntoLiveNotification(
+                "collector_failure",
+                "Collector failing",
+                failures + " consecutive CareLink failures. Open the app to check session.",
+                Color.parseColor("#C77C1E"),
+                false,
+                true);
     }
 
     /** Notification Refresh action / manual poke. */
@@ -754,8 +758,8 @@ public class BackgroundPlugin extends Plugin {
     }
 
     /**
-     * Ongoing glucose Live Update (Android 16+ ProgressStyle chip) with sticky fallback.
-     * Avoids custom large-icon bitmaps — those crush padding in the system template.
+     * Ongoing glucose Live Update — single sticky notification for glucose + alerts.
+     * Right-side badge color follows the latest alert (or clinical range when calm).
      */
     private void showLiveGlucoseNotification(String glucose, String trendArrow, String age, String status,
             String details, double sgValue, boolean playSound) {
@@ -766,10 +770,30 @@ public class BackgroundPlugin extends Plugin {
                 return;
             }
 
+            // Remember snapshot for alert-only refreshes.
+            lastGlucose = glucose != null ? glucose : "--";
+            lastTrend = trendArrow != null ? trendArrow : "";
+            lastAge = age != null ? age : "";
+            lastStatus = status != null ? status : "";
+            lastDetails = details != null ? details : "";
+            lastSg = sgValue;
+
+            // Clear non-critical banner once glucose is calmly in range again.
+            if (sgValue >= alarmLow && sgValue <= alarmHigh && !liveAlertCritical) {
+                liveAlertTitle = null;
+                liveAlertBody = null;
+                liveAlertColor = 0;
+                liveAlertRule = null;
+            }
+
             NotificationManager notificationManager = (NotificationManager) context
                     .getSystemService(Context.NOTIFICATION_SERVICE);
+            cancelSatelliteNotifications(notificationManager);
 
-            String channelId = playSound ? CHANNEL_ALERT : CHANNEL_NORMAL;
+            boolean criticalSound = playSound && (liveAlertCritical
+                    || (sgValue > 0 && sgValue < alarmUrgentLow));
+            String channelId = criticalSound ? CHANNEL_CRITICAL
+                    : (playSound ? CHANNEL_ALERT : CHANNEL_NORMAL);
             ensureNotificationChannels();
 
             Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
@@ -783,11 +807,10 @@ public class BackgroundPlugin extends Plugin {
                     context, 0, refreshIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-            int accentColor = rangeAccentColor(sgValue);
-            String valueText = (glucose != null && !glucose.isEmpty()) ? glucose : "--";
-            String trendText = trendArrow != null ? trendArrow.trim() : "";
-            String ageText = (age != null && !age.isEmpty()) ? age : "--";
-            String statusText = status != null ? status.trim() : "";
+            String valueText = lastGlucose.isEmpty() ? "--" : lastGlucose;
+            String trendText = lastTrend.trim();
+            String ageText = lastAge.isEmpty() ? "--" : lastAge;
+            String statusText = lastStatus.trim();
             if (statusText.isEmpty() && sgValue > 0) {
                 if (sgValue < 3.0)
                     statusText = "Very low";
@@ -800,10 +823,13 @@ public class BackgroundPlugin extends Plugin {
                 else
                     statusText = "Very high";
             }
-            String detailsText = details != null ? details.trim() : "";
+            String detailsText = lastDetails.trim();
 
-            // Keep title short so the system template has room (no dense "value · age" mash).
             String title = valueText + " mmol/L" + (trendText.isEmpty() ? "" : " " + trendText);
+            if (liveAlertTitle != null && !liveAlertTitle.isEmpty()) {
+                title = liveAlertTitle;
+            }
+
             String body = statusText;
             if (!ageText.isEmpty() && !"--".equals(ageText)) {
                 body = statusText.isEmpty() ? ageText : statusText + " \u00b7 " + ageText;
@@ -811,18 +837,31 @@ public class BackgroundPlugin extends Plugin {
             if (!detailsText.isEmpty()) {
                 body = body.isEmpty() ? detailsText : body + "\n" + detailsText;
             }
+            if (liveAlertBody != null && !liveAlertBody.isEmpty()) {
+                body = body.isEmpty() ? liveAlertBody : liveAlertBody + "\n" + body;
+            } else if (liveAlertTitle != null && !liveAlertTitle.isEmpty()
+                    && !title.equals(valueText + " mmol/L" + (trendText.isEmpty() ? "" : " " + trendText))) {
+                // Alert title replaced glucose title — keep glucose in the body line.
+                String glucoseLine = valueText + " mmol/L"
+                        + (trendText.isEmpty() ? "" : " " + trendText)
+                        + (ageText.isEmpty() || "--".equals(ageText) ? "" : " \u00b7 " + ageText);
+                body = body.isEmpty() ? glucoseLine : glucoseLine + "\n" + body;
+            }
 
-            // Status-bar chip text is short (~7 chars).
             String chipText = valueText;
             if (chipText.length() > 7) {
                 chipText = chipText.substring(0, 7);
             }
 
+            int badgeColor = liveAlertColor != 0 ? liveAlertColor : rangeAccentColor(sgValue);
+            boolean showAlertMark = liveAlertTitle != null && !liveAlertTitle.isEmpty();
             int iconId = getNotificationIcon(context);
+
             NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
                     .setContentTitle(title)
                     .setContentText(body)
                     .setSmallIcon(iconId)
+                    .setLargeIcon(createStatusBadgeIcon(badgeColor, showAlertMark))
                     .setAutoCancel(false)
                     .setOngoing(true)
                     .setRequestPromotedOngoing(true)
@@ -831,11 +870,22 @@ public class BackgroundPlugin extends Plugin {
                     .setShowWhen(false)
                     .setContentIntent(pendingIntent)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setCategory(NotificationCompat.CATEGORY_STATUS)
-                    .setPriority(NotificationCompat.PRIORITY_HIGH)
-                    .setColor(accentColor)
-                    .setStyle(buildGlucoseProgressStyle(context, sgValue, iconId))
+                    .setCategory(criticalSound || showAlertMark
+                            ? NotificationCompat.CATEGORY_ALARM
+                            : NotificationCompat.CATEGORY_STATUS)
+                    .setPriority(criticalSound
+                            ? NotificationCompat.PRIORITY_MAX
+                            : NotificationCompat.PRIORITY_HIGH)
+                    .setColor(badgeColor)
+                    .setStyle(buildGlucoseProgressStyle(sgValue))
                     .addAction(android.R.drawable.ic_popup_sync, "Refresh", refreshPending);
+
+            if (playSound) {
+                builder.setDefaults(NotificationCompat.DEFAULT_ALL);
+            }
+            if (criticalSound) {
+                builder.setFullScreenIntent(pendingIntent, true);
+            }
 
             Notification notification = builder.build();
             notificationManager.notify(NOTIFICATION_ID, notification);
@@ -850,25 +900,70 @@ public class BackgroundPlugin extends Plugin {
             }
             this.doLogg("showNotification: notified OK canPromote=" + canPromote
                     + " promotable=" + promotable
+                    + " alert=" + (liveAlertRule != null ? liveAlertRule : "none")
                     + " api=" + Build.VERSION.SDK_INT);
-
-            boolean bridgeAlive = pluginRef != null && pluginRef.get() != null;
-            if (!bridgeAlive && sgValue > 0 && sgValue < alarmLow) {
-                String critTitle = sgValue < alarmUrgentLow ? "Urgent low" : "Low glucose";
-                showCriticalNotification(context, notificationManager, critTitle, title, pendingIntent);
-            }
         } catch (Exception e) {
             this.doLogg("showNotification CRASHED: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
+    /** Fold any alarm/status into the single live notification and drop satellite notifs. */
+    private void pushIntoLiveNotification(String rule, String title, String body, int color,
+            boolean critical, boolean sound) {
+        liveAlertRule = rule;
+        liveAlertTitle = title;
+        liveAlertBody = body;
+        liveAlertColor = color;
+        liveAlertCritical = critical;
+        this.doLogg("live alert: " + rule + " critical=" + critical);
+        showLiveGlucoseNotification(lastGlucose, lastTrend, lastAge, lastStatus, lastDetails, lastSg, sound);
+    }
+
+    private void cancelSatelliteNotifications(NotificationManager nm) {
+        if (nm == null) {
+            return;
+        }
+        nm.cancel(CRITICAL_NOTIFICATION_ID);
+        nm.cancel(STATUS_NOTIFICATION_ID);
+        nm.cancel(STATUS_NOTIFICATION_ID + 1);
+        String[] rules = {
+                "urgent_low", "low", "high", "stale", "status", "collector_failure", "alarm",
+                "collector_failure", liveAlertRule
+        };
+        for (String rule : rules) {
+            if (rule == null || rule.isEmpty()) {
+                continue;
+            }
+            nm.cancel(ALARM_NOTIFICATION_BASE + Math.abs(rule.hashCode() % 80));
+        }
+    }
+
+    /** Right-side badge: solid circle, "!" when an alert is active. */
+    private Bitmap createStatusBadgeIcon(int color, boolean alertMark) {
+        int size = 128;
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
+        bg.setColor(color);
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, bg);
+        if (alertMark) {
+            Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+            text.setColor(Color.WHITE);
+            text.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            text.setTextAlign(Paint.Align.CENTER);
+            text.setTextSize(72f);
+            float y = (size / 2f) - ((text.descent() + text.ascent()) / 2f);
+            canvas.drawText("!", size / 2f, y, text);
+        }
+        return bitmap;
+    }
+
     /**
      * Clinical-range ProgressStyle for Android 16 Live Updates.
      * Scale is mmol/L × 10 from 2.0 → 16.0; segments match Very low / Low / In range / High / Very high.
      */
-    private NotificationCompat.ProgressStyle buildGlucoseProgressStyle(Context context, double sgValue,
-            int iconId) {
+    private NotificationCompat.ProgressStyle buildGlucoseProgressStyle(double sgValue) {
         final int scaleMin = 20; // 2.0 mmol/L
         final int scaleMax = 160; // 16.0 mmol/L
         int progress = 0;
@@ -879,7 +974,7 @@ public class BackgroundPlugin extends Plugin {
             progress = scaled - scaleMin;
         }
 
-        NotificationCompat.ProgressStyle style = new NotificationCompat.ProgressStyle()
+        return new NotificationCompat.ProgressStyle()
                 .setStyledByProgress(false)
                 .setProgress(progress)
                 .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(10)
@@ -892,11 +987,6 @@ public class BackgroundPlugin extends Plugin {
                         .setColor(Color.parseColor("#E8590C"))) // 10.0–13.9 high
                 .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(21)
                         .setColor(Color.parseColor("#C2255C"))); // 13.9–16.0 very high
-
-        if (iconId != 0) {
-            style.setProgressTrackerIcon(IconCompat.createWithResource(context, iconId));
-        }
-        return style;
     }
 
     /** Clinical range colors (tokens), not alarm thresholds. */
@@ -914,75 +1004,28 @@ public class BackgroundPlugin extends Plugin {
         return Color.parseColor("#9A5E10");
     }
 
-
-    private void showCriticalNotification(Context context, NotificationManager notificationManager,
-            String critTitle, String detail, PendingIntent tapIntent) {
-        NotificationCompat.Builder critical = new NotificationCompat.Builder(context, CHANNEL_CRITICAL)
-                .setContentTitle(critTitle)
-                .setContentText(detail)
-                .setSmallIcon(getNotificationIcon(context))
-                .setAutoCancel(true)
-                .setOngoing(false)
-                .setContentIntent(tapIntent)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setPriority(NotificationCompat.PRIORITY_MAX)
-                .setColor(Color.parseColor("#C2255C"))
-                .setDefaults(NotificationCompat.DEFAULT_ALL)
-                .setFullScreenIntent(tapIntent, true);
-
-        notificationManager.notify(CRITICAL_NOTIFICATION_ID, critical.build());
+    private int alertColorForRule(String rule, boolean critical) {
+        if (critical || "urgent_low".equals(rule)) {
+            return Color.parseColor("#9B1B47");
+        }
+        if ("low".equals(rule) || "high".equals(rule) || "stale".equals(rule)) {
+            return Color.parseColor("#C2255C");
+        }
+        return Color.parseColor("#C77C1E"); // status / collector / other
     }
 
     /**
      * Fire a rule-based alarm from Ionic AlarmsService (user thresholds / projection / stale).
-     * critical=true → DND-bypass channel.
+     * Folded into the single live notification (critical still sounds + fullscreen).
      */
     @PluginMethod
     public void fireAlarmAlert(PluginCall call) {
         try {
-            Context context = ctx();
-            if (context == null) {
-                call.reject("No context");
-                return;
-            }
             String title = call.getString("title", "Alarm");
             String body = call.getString("body", "");
             boolean critical = call.getBoolean("critical", false);
             String rule = call.getString("rule", "alarm");
-
-            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-            Intent intent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-            PendingIntent pendingIntent = PendingIntent.getActivity(
-                    context, 0, intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-            String channelId = critical ? CHANNEL_CRITICAL : CHANNEL_ALERT;
-            int notifId = ALARM_NOTIFICATION_BASE + Math.abs(rule.hashCode() % 80);
-
-            NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
-                    .setContentTitle(title)
-                    .setContentText(body == null || body.isEmpty() ? title : body)
-                    .setSmallIcon(getNotificationIcon(context))
-                    .setAutoCancel(true)
-                    .setOngoing(false)
-                    .setContentIntent(pendingIntent)
-                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setCategory(NotificationCompat.CATEGORY_ALARM)
-                    .setPriority(critical ? NotificationCompat.PRIORITY_MAX : NotificationCompat.PRIORITY_HIGH)
-                    .setDefaults(NotificationCompat.DEFAULT_ALL);
-
-            if (body != null && !body.isEmpty()) {
-                builder.setStyle(new NotificationCompat.BigTextStyle().bigText(body).setBigContentTitle(title));
-            }
-            if (critical) {
-                builder.setFullScreenIntent(pendingIntent, true);
-                builder.setColor(Color.parseColor("#C2255C"));
-            }
-
-            nm.notify(notifId, builder.build());
-            this.doLogg("fireAlarmAlert: " + rule + " critical=" + critical);
-
+            pushIntoLiveNotification(rule, title, body, alertColorForRule(rule, critical), critical, true);
             JSObject ret = new JSObject();
             ret.put("success", true);
             call.resolve(ret);
@@ -993,39 +1036,7 @@ public class BackgroundPlugin extends Plugin {
 
     /** Heads-up alarm that does not depend on the Ionic WebView being alive. */
     private void fireNativeAlarm(String rule, String title, String body, boolean critical) {
-        Context context = ctx();
-        if (context == null) return;
-        try {
-            NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-            Intent intent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-            PendingIntent pendingIntent = PendingIntent.getActivity(
-                    context, 0, intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-            String channelId = critical ? CHANNEL_CRITICAL : CHANNEL_ALERT;
-            int notifId = ALARM_NOTIFICATION_BASE + Math.abs(rule.hashCode() % 80);
-            NotificationCompat.Builder builder = new NotificationCompat.Builder(context, channelId)
-                    .setContentTitle(title)
-                    .setContentText(body == null || body.isEmpty() ? title : body)
-                    .setSmallIcon(getNotificationIcon(context))
-                    .setAutoCancel(true)
-                    .setOngoing(false)
-                    .setContentIntent(pendingIntent)
-                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setCategory(NotificationCompat.CATEGORY_ALARM)
-                    .setPriority(critical ? NotificationCompat.PRIORITY_MAX : NotificationCompat.PRIORITY_HIGH)
-                    .setDefaults(NotificationCompat.DEFAULT_ALL);
-            if (body != null && !body.isEmpty()) {
-                builder.setStyle(new NotificationCompat.BigTextStyle().bigText(body).setBigContentTitle(title));
-            }
-            if (critical) {
-                builder.setFullScreenIntent(pendingIntent, true);
-                builder.setColor(Color.parseColor("#C2255C"));
-            }
-            nm.notify(notifId, builder.build());
-            this.doLogg("native alarm: " + rule);
-        } catch (Exception e) {
-            Log.e("BackgroundPlugin", "fireNativeAlarm failed", e);
-        }
+        pushIntoLiveNotification(rule, title, body, alertColorForRule(rule, critical), critical, true);
     }
 
     private void evaluateNativeAlarms(double sgMmol, long readingTsMs, boolean hasValidReading) {
@@ -1195,35 +1206,13 @@ public class BackgroundPlugin extends Plugin {
     }
 
     private void showStatusAlert(String body) {
-        Context context = ctx();
-        if (context == null) {
-            return;
-        }
-        NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-
-        Intent launchIntent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-                context, 0, launchIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ALERT)
-                .setContentTitle("Status alert")
-                .setContentText(body)
-                .setSmallIcon(getNotificationIcon(context))
-                .setAutoCancel(true)
-                .setOngoing(false)
-                .setContentIntent(pendingIntent)
-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                .setCategory(NotificationCompat.CATEGORY_STATUS)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setColor(Color.parseColor("#C77C1E"))
-                .setDefaults(NotificationCompat.DEFAULT_SOUND | NotificationCompat.DEFAULT_VIBRATE);
-
-        if (body.contains("\n")) {
-            builder.setStyle(new NotificationCompat.BigTextStyle().bigText(body));
-        }
-
-        nm.notify(STATUS_NOTIFICATION_ID, builder.build());
+        pushIntoLiveNotification(
+                "status",
+                "Status alert",
+                body,
+                Color.parseColor("#C77C1E"),
+                false,
+                true);
     }
 
     @PluginMethod

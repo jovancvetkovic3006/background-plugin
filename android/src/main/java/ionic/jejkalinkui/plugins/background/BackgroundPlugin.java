@@ -939,20 +939,23 @@ public class BackgroundPlugin extends Plugin {
         }
     }
 
-    /** Right-side badge: solid circle, "!" when an alert is active. */
+    /** Right-side badge: solid circle with transparent inset so it isn't flush to the edge. */
     private Bitmap createStatusBadgeIcon(int color, boolean alertMark) {
         int size = 128;
+        // Leave ~12% transparent margin so the system large-icon slot doesn't look edge-stuck.
+        float pad = size * 0.12f;
+        float radius = (size / 2f) - pad;
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
         bg.setColor(color);
-        canvas.drawCircle(size / 2f, size / 2f, size / 2f, bg);
+        canvas.drawCircle(size / 2f, size / 2f, radius, bg);
         if (alertMark) {
             Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
             text.setColor(Color.WHITE);
             text.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
             text.setTextAlign(Paint.Align.CENTER);
-            text.setTextSize(72f);
+            text.setTextSize(radius * 1.15f);
             float y = (size / 2f) - ((text.descent() + text.ascent()) / 2f);
             canvas.drawText("!", size / 2f, y, text);
         }

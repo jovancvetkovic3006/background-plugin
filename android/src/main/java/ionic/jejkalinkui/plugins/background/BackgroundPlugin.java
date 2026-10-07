@@ -17,6 +17,7 @@ import android.content.Context;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
+import androidx.core.graphics.drawable.IconCompat;
 
 import android.app.Activity;
 import android.app.PendingIntent;
@@ -877,7 +878,7 @@ public class BackgroundPlugin extends Plugin {
                             ? NotificationCompat.PRIORITY_MAX
                             : NotificationCompat.PRIORITY_HIGH)
                     .setColor(badgeColor)
-                    .setStyle(buildGlucoseProgressStyle(sgValue))
+                    .setStyle(buildGlucoseProgressStyle(context, sgValue))
                     .addAction(android.R.drawable.ic_popup_sync, "Refresh", refreshPending);
 
             if (playSound) {
@@ -965,19 +966,34 @@ public class BackgroundPlugin extends Plugin {
     /**
      * Clinical-range ProgressStyle for Android 16 Live Updates.
      * Scale is mmol/L × 10 from 2.0 → 16.0; segments match Very low / Low / In range / High / Very high.
+     * Progress is clamped with a small edge inset so the tracker icon stays on-bar at min/max.
      */
-    private NotificationCompat.ProgressStyle buildGlucoseProgressStyle(double sgValue) {
+    private NotificationCompat.ProgressStyle buildGlucoseProgressStyle(Context context, double sgValue) {
         final int scaleMin = 20; // 2.0 mmol/L
         final int scaleMax = 160; // 16.0 mmol/L
-        int progress = 0;
+        // Segment lengths: 10 + 9 + 61 + 39 + 21
+        final int total = 140;
+        // Keep tracker fully drawable at either end (system clips at 0 / total).
+        final int edgeInset = 4;
+
+        int progress = edgeInset;
         if (sgValue > 0) {
             int scaled = (int) Math.round(sgValue * 10.0);
-            if (scaled < scaleMin) scaled = scaleMin;
-            if (scaled > scaleMax) scaled = scaleMax;
-            progress = scaled - scaleMin;
+            if (scaled <= scaleMin) {
+                progress = edgeInset; // pin to start
+            } else if (scaled >= scaleMax) {
+                progress = total - edgeInset; // pin to end
+            } else {
+                progress = scaled - scaleMin;
+                if (progress < edgeInset) {
+                    progress = edgeInset;
+                } else if (progress > total - edgeInset) {
+                    progress = total - edgeInset;
+                }
+            }
         }
 
-        return new NotificationCompat.ProgressStyle()
+        NotificationCompat.ProgressStyle style = new NotificationCompat.ProgressStyle()
                 .setStyledByProgress(false)
                 .setProgress(progress)
                 .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(10)
@@ -990,6 +1006,28 @@ public class BackgroundPlugin extends Plugin {
                         .setColor(Color.parseColor("#E8590C"))) // 10.0–13.9 high
                 .addProgressSegment(new NotificationCompat.ProgressStyle.Segment(21)
                         .setColor(Color.parseColor("#C2255C"))); // 13.9–16.0 very high
+
+        style.setProgressTrackerIcon(
+                IconCompat.createWithBitmap(createTrackerDotIcon(rangeAccentColor(sgValue))));
+        return style;
+    }
+
+    /** Compact on-bar tracker dot (not the right-side large badge). */
+    private Bitmap createTrackerDotIcon(int color) {
+        int size = 64;
+        float pad = size * 0.18f;
+        float radius = (size / 2f) - pad;
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        fill.setColor(color);
+        canvas.drawCircle(size / 2f, size / 2f, radius, fill);
+        Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        ring.setStyle(Paint.Style.STROKE);
+        ring.setStrokeWidth(size * 0.08f);
+        ring.setColor(Color.WHITE);
+        canvas.drawCircle(size / 2f, size / 2f, radius - ring.getStrokeWidth() / 2f, ring);
+        return bitmap;
     }
 
     /** Clinical range colors (tokens), not alarm thresholds. */

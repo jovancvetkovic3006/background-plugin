@@ -943,12 +943,12 @@ public class BackgroundPlugin extends Plugin {
     /** Right-side badge: solid circle with extra right inset to mirror the left app-icon gutter. */
     private Bitmap createStatusBadgeIcon(int color, boolean alertMark) {
         int size = 128;
-        // Uniform inset + extra shift left so the right gutter matches the small-icon left margin.
-        float pad = size * 0.14f;
-        float extraRight = size * 0.14f;
+        // Larger disc, still shifted left so the right gutter matches the small-icon left margin.
+        float pad = size * 0.06f;
+        float extraRight = size * 0.12f;
         float radius = (size / 2f) - pad - (extraRight / 2f);
-        if (radius < size * 0.28f) {
-            radius = size * 0.28f;
+        if (radius < size * 0.36f) {
+            radius = size * 0.36f;
         }
         float cx = (size / 2f) - (extraRight / 2f);
         float cy = size / 2f;

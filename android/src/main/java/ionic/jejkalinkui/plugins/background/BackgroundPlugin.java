@@ -940,25 +940,31 @@ public class BackgroundPlugin extends Plugin {
         }
     }
 
-    /** Right-side badge: solid circle with transparent inset so it isn't flush to the edge. */
+    /** Right-side badge: solid circle with extra right inset to mirror the left app-icon gutter. */
     private Bitmap createStatusBadgeIcon(int color, boolean alertMark) {
         int size = 128;
-        // Leave ~12% transparent margin so the system large-icon slot doesn't look edge-stuck.
-        float pad = size * 0.12f;
-        float radius = (size / 2f) - pad;
+        // Uniform inset + extra shift left so the right gutter matches the small-icon left margin.
+        float pad = size * 0.14f;
+        float extraRight = size * 0.14f;
+        float radius = (size / 2f) - pad - (extraRight / 2f);
+        if (radius < size * 0.28f) {
+            radius = size * 0.28f;
+        }
+        float cx = (size / 2f) - (extraRight / 2f);
+        float cy = size / 2f;
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
         bg.setColor(color);
-        canvas.drawCircle(size / 2f, size / 2f, radius, bg);
+        canvas.drawCircle(cx, cy, radius, bg);
         if (alertMark) {
             Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
             text.setColor(Color.WHITE);
             text.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
             text.setTextAlign(Paint.Align.CENTER);
             text.setTextSize(radius * 1.15f);
-            float y = (size / 2f) - ((text.descent() + text.ascent()) / 2f);
-            canvas.drawText("!", size / 2f, y, text);
+            float y = cy - ((text.descent() + text.ascent()) / 2f);
+            canvas.drawText("!", cx, y, text);
         }
         return bitmap;
     }

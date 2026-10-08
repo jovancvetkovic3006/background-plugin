@@ -989,13 +989,19 @@ public class BackgroundPlugin extends Plugin {
         CHECK, ARROW_UP, ARROW_DOWN, ARROW_DOUBLE_DOWN, DISCONNECT, CLOCK, BATTERY, WARN, CLOUD_OFF
     }
 
-    /** Right-side badge: colored disc + glyph, equal inset from the top and right edges. */
+    /**
+     * Right-side badge. The system slot is already nearer the notification's right
+     * edge than its top, and the bitmap is center-cropped into that slot. Equal
+     * insets only shrink the disc and leave it closer to the right, so the top
+     * inset stays small and the right inset is larger by about that slot difference.
+     */
     private Bitmap createStatusBadgeIcon(int color, String rule, boolean hasAlert, double sgValue) {
         int size = 128;
-        float inset = size * 0.20f;
-        float radius = size * 0.30f;
-        float cx = size - inset - radius;
-        float cy = inset + radius;
+        float topInset = size * 0.04f;
+        float rightInset = size * 0.29f;
+        float radius = size * 0.34f;
+        float cx = size - rightInset - radius;
+        float cy = topInset + radius;
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);

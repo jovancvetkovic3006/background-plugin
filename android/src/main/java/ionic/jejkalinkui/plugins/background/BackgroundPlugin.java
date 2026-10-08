@@ -989,17 +989,13 @@ public class BackgroundPlugin extends Plugin {
         CHECK, ARROW_UP, ARROW_DOWN, ARROW_DOUBLE_DOWN, DISCONNECT, CLOCK, BATTERY, WARN, CLOUD_OFF
     }
 
-    /** Right-side badge: colored disc + glyph for alert type (or check when calm). */
+    /** Right-side badge: colored disc + glyph, equal inset from the top and right edges. */
     private Bitmap createStatusBadgeIcon(int color, String rule, boolean hasAlert, double sgValue) {
         int size = 128;
-        float pad = size * 0.06f;
-        float extraRight = size * 0.12f;
-        float radius = (size / 2f) - pad - (extraRight / 2f);
-        if (radius < size * 0.36f) {
-            radius = size * 0.36f;
-        }
-        float cx = (size / 2f) - (extraRight / 2f);
-        float cy = size / 2f;
+        float inset = size * 0.08f;
+        float radius = size * 0.38f;
+        float cx = size - inset - radius;
+        float cy = inset + radius;
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);

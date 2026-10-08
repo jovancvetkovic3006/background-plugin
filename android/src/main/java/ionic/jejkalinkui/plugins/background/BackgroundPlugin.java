@@ -992,8 +992,8 @@ public class BackgroundPlugin extends Plugin {
     /** Right-side badge: colored disc + glyph, equal inset from the top and right edges. */
     private Bitmap createStatusBadgeIcon(int color, String rule, boolean hasAlert, double sgValue) {
         int size = 128;
-        float inset = size * 0.08f;
-        float radius = size * 0.38f;
+        float inset = size * 0.20f;
+        float radius = size * 0.30f;
         float cx = size - inset - radius;
         float cy = inset + radius;
         Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);

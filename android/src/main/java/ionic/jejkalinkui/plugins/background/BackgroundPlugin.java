@@ -778,14 +778,7 @@ public class BackgroundPlugin extends Plugin {
             lastStatus = status != null ? status : "";
             lastDetails = details != null ? details : "";
             lastSg = sgValue;
-
-            // Clear non-critical banner once glucose is calmly in range again.
-            if (sgValue >= alarmLow && sgValue <= alarmHigh && !liveAlertCritical) {
-                liveAlertTitle = null;
-                liveAlertBody = null;
-                liveAlertColor = 0;
-                liveAlertRule = null;
-            }
+            reconcileLiveAlert(sgValue, status);
 
             NotificationManager notificationManager = (NotificationManager) context
                     .getSystemService(Context.NOTIFICATION_SERVICE);
@@ -907,6 +900,56 @@ public class BackgroundPlugin extends Plugin {
             this.doLogg("showNotification CRASHED: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+    /**
+     * Drop a stuck banner when a fresh reading no longer matches it.
+     * Data-gap alerts ("No data…", disconnect) clear on any real SG.
+     * Glucose alarms clear once the value leaves that band.
+     */
+    private void reconcileLiveAlert(double sgValue, String incomingStatus) {
+        if (liveAlertRule == null || looksLikeGapStatus(incomingStatus) || sgValue <= 0) {
+            return;
+        }
+        boolean clear = false;
+        if (isDataGapRule(liveAlertRule)) {
+            clear = true;
+        } else if ("urgent_low".equals(liveAlertRule)) {
+            clear = sgValue >= alarmUrgentLow;
+        } else if ("low".equals(liveAlertRule) || "falling_fast".equals(liveAlertRule)
+                || "projection".equals(liveAlertRule)) {
+            clear = sgValue >= alarmLow;
+        } else if ("high".equals(liveAlertRule)) {
+            clear = sgValue <= alarmHigh;
+        }
+        if (!clear) {
+            return;
+        }
+        liveAlertTitle = null;
+        liveAlertBody = null;
+        liveAlertColor = 0;
+        liveAlertRule = null;
+        liveAlertCritical = false;
+    }
+
+    private boolean isDataGapRule(String rule) {
+        return "stale".equals(rule)
+                || "sensor_disconnected".equals(rule)
+                || "pump_disconnected".equals(rule)
+                || "session".equals(rule)
+                || "collector_failure".equals(rule);
+    }
+
+    private boolean looksLikeGapStatus(String status) {
+        if (status == null || status.isEmpty()) {
+            return false;
+        }
+        String s = status.toLowerCase(Locale.US);
+        return s.contains("no data")
+                || s.contains("no fresh")
+                || s.contains("disconnect")
+                || s.contains("session expired")
+                || s.contains("collector");
     }
 
     /** Fold any alarm/status into the single live notification and drop satellite notifs. */

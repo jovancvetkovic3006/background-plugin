@@ -19,6 +19,11 @@ import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
 import androidx.core.graphics.drawable.IconCompat;
 
+import com.google.android.gms.wearable.DataMap;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.PutDataRequest;
+import com.google.android.gms.wearable.Wearable;
+
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.graphics.Bitmap;
@@ -883,6 +888,7 @@ public class BackgroundPlugin extends Plugin {
 
             Notification notification = builder.build();
             notificationManager.notify(NOTIFICATION_ID, notification);
+            publishWatchGlucose(context, valueText, trendText, sgValue);
 
             boolean canPromote = NotificationManagerCompat.from(context).canPostPromotedNotifications();
             boolean promotable = false;
@@ -899,6 +905,23 @@ public class BackgroundPlugin extends Plugin {
         } catch (Exception e) {
             this.doLogg("showNotification CRASHED: " + e.getMessage());
             e.printStackTrace();
+        }
+    }
+
+    /** Latest glucose for the Galaxy Watch complication. Same package name on both sides. */
+    private void publishWatchGlucose(Context context, String valueText, String trendText, double sgValue) {
+        try {
+            PutDataMapRequest request = PutDataMapRequest.create("/jejkalink/glucose");
+            DataMap map = request.getDataMap();
+            String text = valueText == null || valueText.isEmpty() ? "--" : valueText;
+            map.putString("text", text);
+            map.putFloat("mmol", (float) sgValue);
+            map.putString("trend", trendText == null ? "" : trendText.trim());
+            map.putLong("updatedAt", System.currentTimeMillis());
+            PutDataRequest put = request.asPutDataRequest().setUrgent();
+            Wearable.getDataClient(context).putDataItem(put);
+        } catch (Throwable t) {
+            Log.w("BackgroundPlugin", "watch sync failed", t);
         }
     }
 
